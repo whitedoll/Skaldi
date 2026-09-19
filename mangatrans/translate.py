@@ -7,6 +7,7 @@ from .config import Config
 from .glossary import glossary_prompt
 from .llm import looks_refused
 from .normalize import leftover_kana, normalize_ko
+from .ocr import OCR_MISMATCH
 from .order import sfx_allowed_in_bubble, sibling_sfx
 from .page import Page, Region
 
@@ -33,8 +34,11 @@ _CAT_KO = {"dialogue": "대사", "narration": "나레이션", "label": "라벨/�
 
 
 def _targets(page: Page) -> list[Region]:
+    # OCR 교차검증에서 걸린 영역은 원문이 가짜일 가능성이 커서 번역하지 않는다. 문맥으로 넣으면
+    # 지어낸 문장이 같은 페이지의 다른 번역까지 흐린다.
     return [r for r in page.ordered()
-            if r.text_ja.strip() and r.category in ("dialogue", "narration", "label", "unknown", "sfx")]
+            if r.text_ja.strip() and r.category in ("dialogue", "narration", "label", "unknown", "sfx")
+            and not r.notes.startswith(OCR_MISMATCH)]
 
 
 def _system(cfg: Config, glossary: dict) -> str:

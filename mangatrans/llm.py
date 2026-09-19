@@ -62,6 +62,7 @@ class OllamaClient:
         schema: dict[str, Any] | None = None,
         system: str | None = None,
         num_ctx: int = 8192,
+        num_predict: int | None = None,
     ) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
         if system:
@@ -70,11 +71,14 @@ class OllamaClient:
         if images:
             msg["images"] = [png_bytes(im) for im in images]
         messages.append(msg)
+        options: dict[str, Any] = {"temperature": self.cfg.temperature, "num_ctx": num_ctx}
+        if num_predict:
+            options["num_predict"] = num_predict     # 같은 글자를 끝없이 반복하는 폭주를 끊는다
         kwargs: dict[str, Any] = dict(
             model=model,
             messages=messages,
             format=schema or "json",
-            options={"temperature": self.cfg.temperature, "num_ctx": num_ctx},
+            options=options,
         )
         try:
             resp = self.client.chat(think=False, **kwargs)
@@ -107,7 +111,7 @@ class GeminiClient:
         self.cfg = cfg
         self.client = genai.Client(api_key=key)
 
-    def chat_json(self, model, prompt, images=None, schema=None, system=None, num_ctx=None):
+    def chat_json(self, model, prompt, images=None, schema=None, system=None, num_ctx=None, num_predict=None):
         from google.genai import types
 
         contents: list[Any] = [prompt]

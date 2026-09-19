@@ -17,6 +17,10 @@ ocr:
   backend: baberu               # baberu | llm
   baberu_repo: genshiai-daichi/baberu-ocr
   crop_padding: 4               # 글자 박스 크롭 여백(px)
+  # 말풍선 밖 글자는 비전 모델로 한 번 더 읽어 Baberu 결과와 비교한다. 검은 톤 위 흰 외곽선 손글씨처럼
+  # Baberu 가 못 읽는 글자에서 그럴듯한 가짜 문장(それは．．．ですが)을 지어내는 환각을 거른다.
+  cross_check: true
+  cross_check_min: 0.2          # 일치도(0~1)가 이 값 미만이면 번역하지 않고 원본 유지 (실측: 정상 0.25~1.0, 환각 0~0.06)
 
 llm:
   backend: ollama               # ollama | gemini (gemini는 번역 전용)

@@ -29,6 +29,8 @@ class OcrCfg(BaseModel):
     backend: str = "baberu"
     baberu_repo: str = "genshiai-daichi/baberu-ocr"
     crop_padding: int = 4
+    cross_check: bool = True            # 말풍선 밖 글자를 비전 모델로 한 번 더 읽어 OCR 환각을 거른다
+    cross_check_min: float = 0.2        # 두 읽기의 일치도가 이 값 미만이면 원본 유지(needs_review)
 
 
 class LlmCfg(BaseModel):

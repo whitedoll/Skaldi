@@ -17,7 +17,7 @@ from .erase import Eraser
 from .export import export_result
 from .glossary import load_glossary
 from .llm import make_client
-from .ocr import crop_region, make_ocr
+from .ocr import cross_check, crop_region, make_ocr
 from .order import classify_styles, order_and_classify, pixel_style_check
 from .page import Page, Region
 from .progress import emit
@@ -168,6 +168,10 @@ class Pipeline:
                 classify_styles(self.cfg, self.client, image, page)
             # 번역 전에 글꼴 판정을 원문 획으로 보정한다 (번역 단계의 손글씨 효과음 판정이 이 값을 쓴다)
             pixel_style_check(np.array(image.convert("L")), page)
+            # Baberu 가 못 읽는 손글씨에서 지어낸 문장은 번역 전에 거른다 (LLM OCR 이면 같은 모델이라 의미 없음)
+            if self.cfg.ocr.cross_check and self.ocr.name == "baberu":
+                emit("stage", name="OCR 교차검증")
+                cross_check(self.cfg, self.client, image, page)
             page.models["vision"] = self.cfg.llm.vision_model
         else:
             from .order import heuristic_order
