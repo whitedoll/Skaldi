@@ -34,6 +34,8 @@ class Region(BaseModel):
     needs_review: bool = False                # 원문이 불명확하거나 번역 모델이 뜻을 못 잡음 → 원본 유지
     body_box: list[int] | None = None         # 말풍선 안쪽에 실제로 글자가 들어가는 사각형 (픽셀 측정값)
     target_box: list[int] | None = None       # 글자를 넣을 영역 (말풍선 넓히기 등으로 조정된 값)
+    angle: float = 0.0                        # 원문 글자 기울기(도, 반시계 +). 0 이면 똑바로 그린다
+    rot_box: list[float] | None = None        # 기운 글자의 배치 상자: [중심x, 중심y, 폭, 높이] (세운 좌표의 크기)
     widened: bool = False                     # 말풍선을 넓혔는지
     overflow: bool = False                    # 최소 크기에서도 넘침
     refused: bool = False                     # 번역 거부·순화 감지

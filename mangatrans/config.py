@@ -81,6 +81,8 @@ class RenderCfg(BaseModel):
     bold_stroke_ratio: float = 0.16     # 획 두께/글자 크기 가 이 값 이상이면 bold
     fake_bold_ratio: float = 0.025      # 진짜 굵은 자형이 없는 폰트에서 획을 덧대는 두께 비율
     fake_bold_styles: list[str] = Field(default_factory=lambda: ["hand"])
+    follow_angle: bool = True           # 원문이 기울어 있으면 번역문도 같은 각도로 돌려 그림
+    supersample_below: int = 35         # 이 크기(px) 미만 글자는 크게 그려 줄여서 계단 현상을 줄임
 
 
 class AnyTextCfg(BaseModel):

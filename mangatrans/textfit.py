@@ -147,16 +147,32 @@ def _fits(lines: list[str], font_path: str, size: int, box_w: int, box_h: int,
 
 def fit_text(text: str, font_path: str, box_w: int, box_h: int, base: int, minimum: int,
              spacing: float, fallback: str | None = None) -> tuple[int, list[str], bool]:
-    """base 크기부터 minimum 까지 줄여 가며 박스에 들어가는 크기를 찾는다.
+    """base 이하에서 박스에 들어가는 가장 큰 크기를 이진탐색으로 찾고, 줄 길이를 고르게 나눈다.
+
+    예전에는 base 에서 약 8%씩(size // 12) 계단식으로 줄여 최대 8% 가까이 작게 그릴 수 있었다.
     단어 중간 끊기는 최소 크기에서도 안 들어갈 때만 허용한다. 돌려주는 값: (크기, 줄 목록, overflow)"""
-    size = base
-    while True:
+    minimum = min(minimum, base)
+
+    def attempt(size: int) -> list[str] | None:
         lines = wrap(text, font_path, size, box_w, allow_char_break=False, fallback=fallback)
         if lines is not None and int(size * spacing) * len(lines) <= box_h:
-            return size, lines, False
-        if size <= minimum:
-            break
-        size = max(minimum, size - max(1, size // 12))
+            return lines
+        return None
+
+    if attempt(minimum) is not None:
+        if attempt(base) is not None:
+            best = base
+        else:
+            lo, hi = minimum, base                      # lo 는 들어가고 hi 는 안 들어간다
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if attempt(mid) is not None:
+                    lo = mid
+                else:
+                    hi = mid
+            best = lo
+        lines = attempt(best) or [text]
+        return best, balance_lines(text, lines, font_path, best, box_w, fallback), False
     # 최소 크기에서도 단어를 안 끊고는 안 들어간다. 글자 단위 줄바꿈을 허용하고, 그래도 넘치면
     # 최소 크기 아래로 더 줄인다. 글자가 조금 작아지는 편이 말풍선 밖으로 크게 삐져나오는 것보다 낫다.
     floor = max(8, minimum // 2)
@@ -168,6 +184,26 @@ def fit_text(text: str, font_path: str, box_w: int, box_h: int, base: int, minim
         if size <= floor:
             return size, lines, True
         size -= 1
+
+
+def balance_lines(text: str, lines: list[str], font_path: str, size: int, box_w: int,
+                  fallback: str | None = None) -> list[str]:
+    """줄 수는 그대로 두고 줄 길이를 고르게 다시 나눈다.
+
+    탐욕 줄바꿈은 앞줄을 폭까지 꽉 채워 마지막 줄에 한두 글자만 남기곤 한다('봉사해 / 봐♡').
+    같은 줄 수가 나오는 가장 좁은 폭으로 다시 나누면 가장 긴 줄이 최소가 되어 줄 길이가 고르다.
+    말풍선은 가운데가 넓어서, 좁고 고른 글자 덩어리가 곡선에도 덜 걸친다.
+    단어 하나가 폭을 넘어 조사 단위로 쪼갠 경우와 줄바꿈 문자가 든 경우는 건드리지 않는다."""
+    if len(lines) < 2 or "\n" in text:
+        return lines
+    words = [w for w in text.split(" ") if w]
+    if not words or max(text_width(w, font_path, size, fallback) for w in words) > box_w:
+        return lines
+    width = natural_width(text, font_path, size, len(lines), fallback)
+    if width >= box_w:
+        return lines
+    out = wrap(text, font_path, size, width, allow_char_break=False, fallback=fallback)
+    return out if out is not None and len(out) == len(lines) else lines
 
 
 def natural_width(text: str, font_path: str, size: int, max_lines: int,

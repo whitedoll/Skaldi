@@ -6,6 +6,7 @@ from typing import Any
 from .config import Config
 from .glossary import glossary_prompt
 from .llm import looks_refused
+from .normalize import leftover_kana, normalize_ko
 from .order import sfx_allowed_in_bubble, sibling_sfx
 from .page import Page, Region
 
@@ -100,7 +101,7 @@ def translate_page(cfg: Config, client, page: Page, glossary: dict) -> None:
             if looks_refused(r.text_ja, ko):
                 still.append(r)
                 continue
-            r.text_ko = ko
+            r.text_ko = normalize_ko(ko)            # 「」·ｗ·ー·새어 나온 바이트 등 표기 정리
             r.refused = False
             vision_sfx = r.notes == "vision:sfx"
             if note == "sfx" and r.category != "sfx" and sfx_allowed_in_bubble(r.text_ja) and (
@@ -121,5 +122,9 @@ def translate_page(cfg: Config, client, page: Page, glossary: dict) -> None:
         r.refused = True
         if not r.text_ko:
             r.text_ko = ""
+    for r in regions:
+        kana = leftover_kana(r.text_ko)
+        if kana and r.render:
+            page.warnings.append(f"번역문에 가나가 남음 (id={r.id}): {kana}")
     sibling_sfx(page.regions)   # 번역 단계에서 효과음으로 확정된 것과 같은 말풍선의 짧은 조각도 묶는다
     page.models["translate"] = ",".join(used) if used else "-"

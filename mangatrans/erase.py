@@ -7,12 +7,16 @@
 """
 from __future__ import annotations
 
+import math
+import re
+
 import cv2
 import numpy as np
 from PIL import Image
 
 from .config import Config
 from .page import Page, Region
+from .skew import rotated_body, rotated_extent, text_angle
 from .textfit import fit_text, natural_width
 
 
@@ -454,6 +458,18 @@ class Eraser:
         lama_mask = np.zeros((h, w), np.uint8)
         e = self.cfg.erase
 
+        # 기울기는 지우기 전 원본에서 잰다 (지우는 도중에는 이웃 글자가 이미 사라져 있을 수 있다)
+        orig_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        for r in page.regions:
+            r.angle, r.rot_box = 0.0, None
+            # 기울기는 글줄에서 나온다. 기호를 뺀 글자가 3자 미만이면('ん♡') 글줄이라 할 수 없다
+            if (r.render and r.erase != "none" and self.cfg.render.follow_angle
+                    and len(re.findall(r"\w", r.text_ja)) >= 3):
+                try:
+                    r.angle = text_angle(orig_gray, r.box)
+                except Exception as ex:  # noqa: BLE001
+                    page.warnings.append(f"기울기 측정 실패 (id={r.id}): {ex}")
+
         for r in page.regions:
             r.body_box, r.target_box, r.widened = None, None, False
             r.text_rgb, r.outline_rgb, r.weight = None, None, "regular"
@@ -487,6 +503,7 @@ class Eraser:
         # 말풍선 본체를 재서 글자 상자의 기준으로 삼는다. 넓히기를 끄더라도 이건 필요하다
         # (탐지기가 준 bubble_box 는 꼬리·뿔까지 감싸서 중심이 본체와 어긋난다).
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        tilted: dict[int, tuple[float, float, float, float]] = {}     # id(r) → 세운 말풍선 상자
         for r in page.regions:
             if not (r.render and r.erase == "white" and r.kind == "bubble_text"):
                 continue
@@ -495,10 +512,50 @@ class Eraser:
                 body = self._measure_body(r, interior)
                 if body and e.widen_bubbles and r.text_ko.strip():
                     self._widen(img, gray, r, page, interior, body)
+                if r.angle and interior is not None and r.body_box and not r.widened:
+                    center = ((r.box[0] + r.box[2]) / 2, (r.box[1] + r.box[3]) / 2)
+                    rb = rotated_body(interior, center, r.angle, self.cfg.render.bubble_fit,
+                                      self.cfg.render.bubble_inner_margin / 2)
+                    if rb:
+                        tilted[id(r)] = rb
             except Exception as ex:  # noqa: BLE001
                 page.warnings.append(f"말풍선 넓히기 실패 (id={r.id}): {ex}")
         assign_target_boxes(page, self.cfg)
+        self._assign_rot_boxes(page, orig_gray, tilted)
         return Image.fromarray(img)
+
+    def _assign_rot_boxes(self, page: Page, gray: np.ndarray,
+                          tilted: dict[int, tuple[float, float, float, float]]) -> None:
+        """기운 글자의 배치 상자(세운 좌표)를 정한다. 못 정하면 각도를 0 으로 돌려 똑바로 그린다.
+
+        말풍선 안: 말풍선을 글자 각도만큼 세워서 잰 본체. 단, 겹침 처리(_stack_overlapping)가
+        배치 상자를 잘랐다면 한 말풍선을 여러 영역이 나눠 쓰는 경우라 세운 본체를 통째로 쓸 수 없다.
+        말풍선 밖: 기운 글자 덩어리를 세운 크기에, 이웃을 보고 넓혀 준 폭(target_box - box)을 더한다."""
+        rc = self.cfg.render
+        for r in page.regions:
+            if not r.angle:
+                continue
+            if not r.render or not r.target_box or r.widened:
+                r.angle = 0.0
+                continue
+            if r.kind == "bubble_text" and (r.body_box or r.bubble_box):
+                rb = tilted.get(id(r))
+                untouched = r.target_box == _bubble_inner_box(r, rc.bubble_inner_margin, page.width, page.height)
+                if rb and untouched:
+                    r.rot_box = [round(v, 1) for v in rb]
+                else:
+                    r.angle = 0.0
+                continue
+            ext = rotated_extent(gray, r.box, r.angle)
+            if not ext:
+                r.angle = 0.0
+                continue
+            fit = _rotated_fit(r.target_box, ext[2] + (r.target_box[2] - r.target_box[0]) - (r.box[2] - r.box[0]),
+                               ext[3], r.angle)
+            if fit is None:
+                r.angle = 0.0
+                continue
+            r.rot_box = [round(v, 1) for v in fit]
 
     def _measure_body(self, r: Region, interior: np.ndarray | None) -> tuple[int, int, int, int] | None:
         """말풍선 내부 마스크에서 본체 사각형을 재어 r.body_box 에 넣는다.
@@ -638,6 +695,29 @@ def assign_target_boxes(page: Page, cfg: Config, margin: int = 10) -> None:
     drawn = [r for r in page.regions if r.render and r.target_box]
     _stack_overlapping([r for r in drawn if _in_bubble(r)])
     _separate_leftovers(drawn)
+
+
+def _rotated_fit(target: list[int], want_w: float, want_h: float, angle: float,
+                 keep: float = 0.6) -> tuple[float, float, float, float] | None:
+    """angle 만큼 돌린 사각형이 target(이웃을 보고 정한 축 정렬 상자) 안에 들어가는 가장 넓은 크기.
+
+    돌리면 외접 사각형이 커져서, 원하는 크기(세운 글자 덩어리 + 옆으로 넓힌 폭) 그대로 돌리면 이웃 글자와
+    붙는다(실측: 095쪽 서류 글씨가 왼쪽 대사에 닿음). 높이를 조금씩 줄여 가며 폭이 가장 넓게 남는 조합을
+    고른다. 똑바로 그릴 때 쓸 수 있는 넓이(target 전체)의 keep 배도 못 건지면 None — 좁은 틀 안에서
+    돌리면 폭이 크게 줄어 글자가 작아지고 잘게 쪼개지므로(실측: 38px 두 줄 → 31px 네 줄), 원본 각도를
+    따르는 것보다 똑바로 크게 그리는 편이 낫다. 돌려주는 값: (중심 x, y, 폭, 높이)."""
+    tx1, ty1, tx2, ty2 = target
+    W, H = tx2 - tx1, ty2 - ty1
+    c, s = abs(math.cos(math.radians(angle))), abs(math.sin(math.radians(angle)))
+    best: tuple[float, float] | None = None
+    for i in range(20, 4, -1):
+        h = want_h * i / 20
+        w = min(want_w, (W - h * s) / c, (H - h * c) / s if s > 1e-6 else want_w)
+        if w > 0 and (best is None or w * h > best[0] * best[1]):
+            best = (w, h)
+    if best is None or best[0] * best[1] < keep * W * H:
+        return None
+    return (tx1 + tx2) / 2, (ty1 + ty2) / 2, best[0], best[1]
 
 
 def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,

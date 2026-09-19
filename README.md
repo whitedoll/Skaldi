@@ -18,7 +18,7 @@ uv sync --extra gemini --extra anytext
 python scripts/download_models.py --anytext   # 모델·폰트 미리 받기 (선택)
 ```
 
-Ollama가 실행 중이어야 하고 `config.yaml`의 모델(`gemma4:12b` 등)이 받아져 있어야 한다.
+Ollama가 실행 중이어야 하고 `config.yaml`의 모델(`hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL`, 폴백용 `gemma4:12b` 등)이 받아져 있어야 한다.
 Qwen 렌더러는 `scripts/install_comfyui.py`로 ComfyUI를 설치한 뒤 사용한다 (약 25GB).
 
 ## 사용
@@ -119,8 +119,8 @@ JSON 플래그: `overflow`(최소 크기의 절반까지 줄여도 넘침 → �
 
 | 역할 | 선택 | 이유 |
 |---|---|---|
-| 번역 | gemma4:12b | 가장 자연스러운 한국어, 거부·순화 없음. 재시도: qwen3.5:9b → exaone3.5:7.8b |
-| 순서·분류 | gemma4:12b | 휴리스틱 순서를 보수적으로 유지, 효과음·라벨 분류 정확. 번역과 같은 모델이라 VRAM 교체 없음 |
+| 번역 | gemma4 26B-A4B UD-Q2_K_XL (`hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL`) | MoE(토큰당 3.8B 활성)라 12GB 카드에서 21% 를 CPU 로 내려도 12b 만큼 빠르고, 12b 가 빠뜨리던 긴 대사를 잡는다. 따옴표·장음 표기가 흔들려 번역 뒤 정규화(mangatrans/normalize.py)를 거친다. 비교: output/bench_ab_gemma4/report_g26q2.md. 재시도: gemma4:12b → qwen3.5:9b → exaone3.5:7.8b |
+| 순서·분류 | gemma4 26B-A4B UD-Q2_K_XL | 번역과 같은 모델이라 쪽마다 모델 교체가 없다(실측 37.6초/쪽, 비전만 12b 로 두면 50초/쪽). 분류 번호 누락도 12b 보다 적었다 |
 | 탈락 | qwen2.5:14b, aya-expanse | 일본어 잔류·누락·환각 |
 
 ## 용어집

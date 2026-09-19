@@ -22,9 +22,12 @@ llm:
   backend: ollama               # ollama | gemini (gemini는 번역 전용)
   ollama_host: http://127.0.0.1:11434
   # 역할별 모델. 벤치마크 결과로 조정한다.
-  vision_model: gemma4:12b      # 읽기 순서 판정, 말풍선 밖 글자 분류, LLM OCR 옵션
-  translate_model: gemma4:12b   # 번역 (벤치마크 1위, 거부 없음)
+  # gemma4 26B-A4B(MoE, 토큰당 3.8B 활성) 2비트. 12GB 카드에서 11GB·79% GPU 로 올라가도 12b 만큼 빠르다.
+  # 비전과 번역을 같은 모델로 두어야 쪽마다 모델 교체가 없다(실측 37.6초/쪽, 섞으면 50초/쪽).
+  vision_model: hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL   # 읽기 순서 판정, 말풍선 밖 글자 분류, LLM OCR 옵션
+  translate_model: hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL   # 번역
   translate_fallbacks:          # 거부·순화 감지 시 순서대로 재시도
+    - gemma4:12b
     - qwen3.5:9b
     - exaone3.5:7.8b
   temperature: 0.1
