@@ -27,7 +27,7 @@ from PIL import Image
 from mangatrans.config import ROOT, load_config
 from mangatrans.export import export_result, list_works, renderers_in
 from mangatrans.page import Page
-from mangatrans.pipeline import Pipeline
+from mangatrans.pipeline import MANUAL_NOTE, Pipeline
 from mangatrans.progress import parse as parse_progress
 
 CFG = load_config()
@@ -502,7 +502,10 @@ def save_and_render(rel: str, renderer: str, rows):
         cat = str(row[2]).strip()
         if cat in CATEGORIES:
             r.category = cat  # type: ignore[assignment]
+        before = r.render
         r.render = str(row[3]).strip().lower() in ("true", "1", "yes", "y", "✓")
+        if r.category == "label" and r.render != before:
+            r.notes = MANUAL_NOTE           # 라벨 규칙(표지 제외 등)이 다음 실행에서 되돌리지 않게
         r.text_ko = str(row[5]) if row[5] is not None else ""
         r.needs_review = str(row[6]).strip().lower() in ("true", "1", "yes", "y")
         st = str(row[7]).strip()

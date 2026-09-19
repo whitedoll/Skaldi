@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import Config
@@ -296,3 +298,40 @@ def classify_styles(cfg: Config, client: OllamaClient, image: Image.Image, page:
         page.warnings.append(f"글꼴 판정이 {hands}/{len(regions)} 를 손글씨로 봐 신뢰하지 않고 고딕으로 둠")
         for r in regions:
             r.style = "gothic"
+
+
+def stroke_variation(gray: np.ndarray, box: list[int]) -> float | None:
+    """검은 획의 굵기가 얼마나 들쭉날쭉한가(표준편차/평균). 측정할 검은 획이 부족하면 None.
+    획 중심선은 거리 변환의 능선으로 잡는다(뼈대 추출 라이브러리 없이)."""
+    x1, y1, x2, y2 = box
+    c = gray[max(0, y1):y2, max(0, x1):x2]
+    ink = (c < 110).astype(np.uint8)
+    if ink.sum() < 30:
+        return None
+    dt = cv2.distanceTransform(ink, cv2.DIST_L2, 3)
+    ridge = (dt > 0) & (dt >= cv2.dilate(dt, np.ones((3, 3), np.uint8)))
+    w = dt[ridge] * 2
+    w = w[w > 1]
+    return float(np.std(w) / np.mean(w)) if len(w) >= 10 else None
+
+
+def pixel_style_check(gray: np.ndarray, page: Page, threshold: float = 0.37) -> None:
+    """말풍선 안 글자를 모델이 손글씨라고 했어도, 원문 획 굵기가 고르면 인쇄체로 되돌린다.
+
+    조판된 글꼴은 획 굵기가 일정하고 손으로 그린 글씨는 들쭉날쭉하다. 모델은 2~3글자 조각에서 이걸
+    못 가린다 — 08쪽의 인쇄체 'ここ' 'へぇ〜' 를 손글씨로 판정했고, 같은 인쇄체 기준 조각을 나란히 보여 주고
+    다시 물어도 답이 무작위였다(12b·26B 모두). 흰 바탕 말풍선의 검은 획으로 재면 인쇄체 0.25~0.35,
+    손글씨 0.42~0.62 로 갈렸다(5쪽 19영역 전부 맞음). 그림 위 글자는 흰 외곽선과 배경 그림이 섞여
+    값이 흔들리므로 말풍선 안만 본다. 옅은 색 글씨(분홍 손글씨 등)는 잴 수 없어 판정을 그대로 둔다.
+    인쇄체로 되돌릴 때는 같은 페이지 긴 대사들이 가장 많이 쓰는 계열을 따른다."""
+    drawn = [r for r in page.regions if r.render]
+    long_styles = [r.style for r in drawn if r.style != "hand" and len(_SFX_STRIP.sub("", r.text_ja)) > 3]
+    typeset = max(set(long_styles), key=long_styles.count) if long_styles else "gothic"
+    for r in drawn:
+        if r.style != "hand" or r.kind != "bubble_text":
+            continue
+        v = stroke_variation(gray, r.box)
+        if v is not None and v < threshold:
+            r.style = typeset
+            r.notes = (r.notes + f" 글꼴:획 고름({v:.2f})→인쇄체").strip()
+

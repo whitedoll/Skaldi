@@ -6,6 +6,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 from rich.console import Console
 from rich.markup import escape
@@ -17,7 +18,7 @@ from .export import export_result
 from .glossary import load_glossary
 from .llm import make_client
 from .ocr import crop_region, make_ocr
-from .order import classify_styles, order_and_classify
+from .order import classify_styles, order_and_classify, pixel_style_check
 from .page import Page, Region
 from .progress import emit
 from .render import make_renderer
@@ -25,6 +26,23 @@ from .render.compare import compare_sheet
 from .translate import translate_page
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+MANUAL_NOTE = "수동 지정"           # 검수 탭에서 사람이 그리기 여부를 바꾼 영역
+
+
+def apply_label_policy(page: Page, cfg: Config, is_cover: bool) -> None:
+    """라벨(제목·이름표·간판·화면 글자)을 그릴지 정한다. 번역문은 분석 단계에서 이미 JSON 에 있다.
+
+    분석 때가 아니라 그리기 직전에 정하므로, 예전 JSON 을 --rerender 해도 이 규칙이 적용된다.
+    zip 의 첫 이미지(표지)는 제목 로고가 그림의 일부라 원본을 둔다(cover_labels 로 바꿀 수 있다).
+    검수 탭에서 사람이 직접 정한 라벨(notes == MANUAL_NOTE)은 건드리지 않는다."""
+    draw = cfg.render.draw_labels and (cfg.render.cover_labels or not is_cover)
+    for r in page.regions:
+        if r.category != "label" or r.notes == MANUAL_NOTE:
+            continue
+        r.render = draw and bool(r.text_ko.strip()) and not r.needs_review
+        r.erase = ("white" if r.kind == "bubble_text" else "lama") if r.render else "none"
 console = Console()
 
 
@@ -55,6 +73,7 @@ class Pipeline:
         self._client = None
         self._eraser = None
         self._renderers: dict[str, object] = {}
+        self._cover: Path | None = None       # zip 의 첫 이미지(표지). 라벨을 그리지 않는다
 
     # ---- lazy loaders -------------------------------------------------
     @property
@@ -147,6 +166,8 @@ class Pipeline:
             order_and_classify(self.cfg, self.client, image, page)
             if self.cfg.render.match_style:
                 classify_styles(self.cfg, self.client, image, page)
+            # 번역 전에 글꼴 판정을 원문 획으로 보정한다 (번역 단계의 손글씨 효과음 판정이 이 값을 쓴다)
+            pixel_style_check(np.array(image.convert("L")), page)
             page.models["vision"] = self.cfg.llm.vision_model
         else:
             from .order import heuristic_order
@@ -216,10 +237,15 @@ class Pipeline:
                 zf.extractall(src_dir)
         self.out = work
         images = [src_dir / n for n in names if Path(n).suffix.lower() in IMAGE_EXTS]
+        # 표지는 압축 안 순서의 첫 이미지 (결과 zip 도 같은 순서로 만든다). 일부 파일만 골라도 표지는 그대로
+        self._cover = images[0] if images else None
         if files:
             wanted = {Path(f).name for f in files}
             images = [p for p in images if p.name in wanted]
-        self.run(src_dir, renderers, rerender=rerender, force=force, files=images, nest=False)
+        try:
+            self.run(src_dir, renderers, rerender=rerender, force=force, files=images, nest=False)
+        finally:
+            self._cover = None
 
         emit("stage", name="zip 만들기")
         export = export_renderer or renderers[0]
@@ -266,6 +292,7 @@ class Pipeline:
             else:
                 page = self.analyze(src, glossary)
                 page.save(jpath)
+            apply_label_policy(page, self.cfg, is_cover=self._cover is not None and src == self._cover)
             # 지우기·렌더링 단계 경고는 이번 실행에서 다시 만들어지므로 옛것을 지운다
             # (안 지우면 --rerender 할 때마다 이미 고친 문제의 경고가 계속 쌓인다)
             page.warnings = [w for w in page.warnings if not w.startswith(

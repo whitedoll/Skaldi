@@ -150,3 +150,25 @@ def rotated_body(interior: np.ndarray, center: tuple[float, float], angle: float
         return None
     c = inv @ np.array([(rx1 + rx2) / 2, (ry1 + ry2) / 2, 1.0])
     return float(c[0] + x0), float(c[1] + y0), float(rx2 - rx1), float(ry2 - ry1)
+
+
+def line_count(box: list[int], text: str) -> tuple[bool, float]:
+    """원문 글자 덩어리가 (세로쓰기인가, 추정 글줄 수).
+
+    픽셀 투영으로 열을 세면 그림 위 글자의 흰 외곽선이 옆 열과 맞붙어 여러 열도 한 덩어리로 보인다
+    (실측: 3열짜리 대사까지 전부 1줄). 대신 글자 수와 상자 비율로 어림한다. 세로 한 열이면
+    높이/폭 ≈ 글자 수이고, 열이 k개면 높이/폭 ≈ 글자 수/k² 이므로 k ≈ √(글자 수 × 폭/높이).
+    말줄임 점(．・…)은 칸을 덜 차지하므로 1/3 글자로 센다.
+    한 줄짜리 라벨(세로 제목, 이름표)을 세로쓰기로 그릴지 정하는 데 쓴다."""
+    x1, y1, x2, y2 = box
+    w, h = max(1, x2 - x1), max(1, y2 - y1)
+    vertical = h >= w
+    n = 0.0
+    for ch in text:
+        if ch.isspace():
+            continue
+        n += 1 / 3 if ch in "．・…‥.。、，," else 1.0
+    if n <= 0:
+        return vertical, 0.0
+    ratio = (w / h) if vertical else (h / w)
+    return vertical, float(np.sqrt(n * ratio))

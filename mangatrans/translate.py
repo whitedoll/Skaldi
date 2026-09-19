@@ -104,8 +104,13 @@ def translate_page(cfg: Config, client, page: Page, glossary: dict) -> None:
             r.text_ko = normalize_ko(ko)            # 「」·ｗ·ー·새어 나온 바이트 등 표기 정리
             r.refused = False
             vision_sfx = r.notes == "vision:sfx"
+            # 말풍선 안 글자는 번역 모델 혼자 sfx 라고 하면 믿지 않는다(웃음·대답을 효과음으로 볼 수 있어서).
+            # 다만 원문이 손으로 그린 글씨면 두 번째 근거가 된다: 250쪽 말풍선 속 'ゴキュッ' 은 비전 모델이
+            # 번호를 빠뜨려 대사로 번역됐다. 실측으로 번역 모델은 손글씨 영역 중 진짜 효과음 5개(ゴキュッ ピーッ
+            # ジッ！！ …)에만 sfx 라 답했고, 가타카나 규칙이 잘못 걸던 대사(フンッ イベント ヤバ)는 모두 ok 였다.
+            hand_drawn = r.kind == "bubble_text" and r.style == "hand"
             if note == "sfx" and r.category != "sfx" and sfx_allowed_in_bubble(r.text_ja) and (
-                vision_sfx or r.kind == "free_text"
+                vision_sfx or r.kind == "free_text" or hand_drawn
             ):
                 r.category = "sfx"                    # 비전·번역 모델이 모두 소리 표현이라고 본 경우만 원본 유지
                 r.render, r.erase = False, "none"

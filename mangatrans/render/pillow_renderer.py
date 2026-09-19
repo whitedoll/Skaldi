@@ -10,7 +10,8 @@ from ..config import Config
 from ..erase import region_target_box
 from ..normalize import normalize_ko
 from ..page import Page, Region
-from ..textfit import fit_text, fit_vertical, font, has_glyph, split_runs, split_variation, text_width
+from ..textfit import (HALF_CELL_PUNCT, column_steps, fit_text, fit_vertical, font, has_glyph, split_runs,
+                       split_variation, text_width)
 
 # 세로쓰기에서 가로 모양 그대로 쓰면 어색한 문장부호: 세로 전용 자형(CJK 호환 형태)으로 바꾼다
 VERTICAL_FORMS = {
@@ -21,6 +22,16 @@ VERTICAL_FORMS = {
 }
 # 세로 자형이 따로 없는 길게 늘이는 기호: 글자를 90° 돌려 세운다
 VERTICAL_ROTATE = set("ー〜～~-－―")
+
+
+def _fit_one_line(text: str, font_path: str, box_w: int, box_h: int, base: int, minimum: int,
+                  fallback: str | None) -> tuple[int, list[str], bool]:
+    """한 줄로 넣을 수 있는 가장 큰 크기 (옆으로 돌려 세우는 라벨용). 돌려주는 값: (크기, [줄], overflow)"""
+    size = max(minimum, base)
+    while size > minimum and (text_width(text, font_path, size, fallback) > box_w or size > box_h):
+        size -= max(1, size // 24)
+    ok = text_width(text, font_path, size, fallback) <= box_w and size <= box_h
+    return size, [text], not ok
 
 
 class PillowRenderer:
@@ -123,10 +134,22 @@ class PillowRenderer:
         fake_bold = r.weight == "bold" and r.style in set(rc.fake_bold_styles)
         base, minimum = max(6, int(base * fscale)), max(6, int(minimum * fscale))
 
-        vertical = rc.vertical_for_narrow and box_h / box_w >= rc.narrow_ratio
-        if vertical:                                # 좁고 긴 상자는 (옵션) 세로쓰기
+        # 원문이 세로 한 열인 라벨(r.writing): 세로 제목은 원래 크게 쓰므로 기준 크기 대신 자리 폭을 상한으로
+        label_col = r.writing in ("vertical", "sideways")
+        if label_col:
+            base = max(base, int(min(box_w, box_h) * 0.8))
+        if r.writing == "sideways":                 # 가로 한 줄을 시계 방향으로 90° 돌린다: 세운 상자에서 맞춘다
+            box_w, box_h = box_h, box_w
+            angle -= 90.0
+        vertical = r.writing == "vertical" or (
+            r.writing == "auto" and rc.vertical_for_narrow and box_h / box_w >= rc.narrow_ratio)
+        if vertical:                                # 한 글자씩 세로로 (라벨은 원문처럼 한 열)
             text = r.text_ko.replace("...", "…").replace("..", "‥")
-            size, cols, overflow = fit_vertical(text, box_w, box_h, base, minimum, rc.line_spacing)
+            size, cols, overflow = fit_vertical(text, box_w, box_h, base, minimum, rc.line_spacing,
+                                                max_cols=1 if label_col else None)
+        elif r.writing == "sideways":               # 원문처럼 한 줄로
+            size, lines, overflow = _fit_one_line(r.text_ko, font_path, box_w, box_h, base, minimum,
+                                                  self.fallback_path)
         else:
             size, lines, overflow = fit_text(r.text_ko, font_path, box_w, box_h, base, minimum,
                                              rc.line_spacing, fallback=self.fallback_path)
@@ -143,7 +166,7 @@ class PillowRenderer:
             step = int(size * rc.line_spacing) * ss
             col_w = size * 1.08 * ss
             text_w = col_w * len(cols)
-            text_h = step * max(len(c) for c in cols)
+            text_h = step * max(column_steps(c) for c in cols)
         else:
             line_h = int(size * rc.line_spacing) * ss
             widths = [text_width(l, font_path, S, self.fallback_path) for l in lines]
@@ -158,9 +181,18 @@ class PillowRenderer:
             right = mx + text_w / 2
             for ci, col in enumerate(cols):
                 ccx = right - col_w * (ci + 0.5)
-                top = my - step * len(col) / 2
-                for k, ch in enumerate(col):
-                    self._vertical_glyph(stroke_m, fill_m, ccx, top + k * step, ch, font_path, S, ow, bw_)
+                y = my - step * column_steps(col) / 2
+                for ch in col:
+                    if ch == " ":                   # 띄어쓰기는 반 칸 틈
+                        y += step * 0.5
+                        continue
+                    if ch in HALF_CELL_PUNCT:       # 마침표·쉼표: 반 칸, 앞 글자의 오른쪽 아래에 붙인다
+                        self._vertical_glyph(stroke_m, fill_m, ccx + S * 0.3, y - step * 0.45, ch,
+                                             font_path, S, ow, bw_)
+                        y += step * 0.5
+                        continue
+                    self._vertical_glyph(stroke_m, fill_m, ccx, y, ch, font_path, S, ow, bw_)
+                    y += step
         else:
             top = my - line_h * len(lines) / 2
             for i, (line, lw) in enumerate(zip(lines, widths)):

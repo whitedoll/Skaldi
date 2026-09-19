@@ -82,6 +82,10 @@ class RenderCfg(BaseModel):
     fake_bold_ratio: float = 0.025      # 진짜 굵은 자형이 없는 폰트에서 획을 덧대는 두께 비율
     fake_bold_styles: list[str] = Field(default_factory=lambda: ["hand"])
     follow_angle: bool = True           # 원문이 기울어 있으면 번역문도 같은 각도로 돌려 그림
+    draw_labels: bool = True            # 라벨(제목·이름표·간판·화면 글자)도 번역해 그림
+    cover_labels: bool = False          # zip 의 첫 이미지(표지)의 라벨도 그릴지. 표지 제목은 원본을 둔다
+    label_vertical: str = "stack"       # 원문이 세로 한 열인 라벨: stack(세로쓰기) | sideways(가로 한 줄을 90° 돌림)
+                                        # | off(다른 글자처럼 가로쓰기)
     supersample_below: int = 35         # 이 크기(px) 미만 글자는 크게 그려 줄여서 계단 현상을 줄임
 
 

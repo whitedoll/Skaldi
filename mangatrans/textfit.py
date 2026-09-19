@@ -224,16 +224,43 @@ def natural_width(text: str, font_path: str, size: int, max_lines: int,
     return lo
 
 
+HALF_CELL_PUNCT = ".,"              # 세로쓰기에서 반 칸만 차지하고 앞 글자 옆에 붙는 문장부호
+
+
+def column_steps(col: str) -> float:
+    """세로 열 하나의 길이(글자 칸 단위). 띄어쓰기와 마침표·쉼표는 반 칸."""
+    return sum(0.5 if (c == " " or c in HALF_CELL_PUNCT) else 1.0 for c in col)
+
+
 def fit_vertical(text: str, box_w: int, box_h: int, base: int, minimum: int,
-                 spacing: float) -> tuple[int, list[str], bool]:
-    """세로쓰기: 글자를 위→아래로 쌓고 열은 오른쪽→왼쪽. 돌려주는 값: (크기, 열 목록, overflow)"""
-    chars = [c for c in text.replace("\n", " ") if not c.isspace()]
+                 spacing: float, max_cols: int | None = None) -> tuple[int, list[str], bool]:
+    """세로쓰기: 글자를 위→아래로 쌓고 열은 오른쪽→왼쪽. 돌려주는 값: (크기, 열 목록, overflow)
+
+    띄어쓰기는 지우지 않고 반 칸 틈으로 남긴다(한국어는 띄어쓰기가 없으면 '최면당한남편과'처럼 붙어 읽기
+    어렵다). 열을 나눌 때는 단어 경계를 우선하고, 한 단어가 열보다 길 때만 글자 단위로 자른다.
+    max_cols 를 주면 그 열 수 안에 들 때까지 줄인다(원문이 한 열인 세로 제목은 한 열로)."""
+    words = [w for w in text.replace("\n", " ").split(" ") if w]
     size = base
     while True:
         step = max(1, int(size * spacing))
-        per_col = max(1, box_h // step)
-        cols = ["".join(chars[i:i + per_col]) for i in range(0, len(chars), per_col)] or [""]
-        if size * 1.08 * len(cols) <= box_w:
+        cap = max(1.0, float(box_h // step))              # 한 열에 들어가는 칸 수
+        cols: list[str] = []
+        cur = ""
+        for w in words:
+            cand = (cur + " " + w) if cur else w
+            if column_steps(cand) <= cap:
+                cur = cand
+                continue
+            if cur:
+                cols.append(cur)
+            while len(w) > cap:                            # 열보다 긴 단어는 글자 단위로 자른다
+                cols.append(w[:int(cap)])
+                w = w[int(cap):]
+            cur = w
+        if cur:
+            cols.append(cur)
+        cols = cols or [""]
+        if size * 1.08 * len(cols) <= box_w and (max_cols is None or len(cols) <= max_cols):
             return size, cols, False
         if size <= minimum:
             return size, cols, True

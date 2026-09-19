@@ -15,8 +15,9 @@ import numpy as np
 from PIL import Image
 
 from .config import Config
+from .order import pixel_style_check
 from .page import Page, Region
-from .skew import rotated_body, rotated_extent, text_angle
+from .skew import line_count, rotated_body, rotated_extent, text_angle
 from .textfit import fit_text, natural_width
 
 
@@ -86,6 +87,43 @@ def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
     if not bg.any():
         bg = cv2.bitwise_not(glyph)
     return glyph, bg, bg_lum, mixed
+
+
+def _label_writing(r: Region, cfg: Config) -> str:
+    """원문이 세로 한 열인 라벨(세로 제목, 세로 소개 문구)은 번역문도 세로로 그린다.
+    가로로 바꾸면 긴 세로 자리에 짧은 가로줄이 떠 원본 배치와 달라진다(196쪽 제목)."""
+    mode = cfg.render.label_vertical
+    if mode == "off" or r.category != "label" or r.kind != "free_text" or not r.render:
+        return "auto"
+    vertical, lines = line_count(r.box, r.text_ja)
+    if not vertical or lines >= 1.6:
+        return "auto"
+    return "sideways" if mode == "sideways" else "vertical"
+
+
+def _art_text_mask(gray: np.ndarray, box: list[int], dilate: int,
+                   clip: tuple[int, int, int, int]) -> np.ndarray:
+    """그림 위 글자를 LaMa 로 지울 마스크(clip 범위 크기). 상자 전체가 아니라 글자 획 둘레만.
+
+    상자를 통째로 지우면 큰 글자(세로 제목 238×988)에서 메울 면적이 너무 커져 LaMa 가 회색으로
+    뭉갠다(실측: 196쪽 제목 자리에 코트·몸을 덮는 얼룩). 획(검은 글씨와 흰 외곽선 모두)을 찾아
+    글자 크기의 1/4 정도로 닫아 획 속과 글자 안 틈을 메우고, 조금 넓힌다. 획을 거의 못 찾거나
+    마스크가 상자 대부분을 덮으면 예전처럼 상자 전체를 쓴다."""
+    from .skew import stroke_mask
+    x1, y1, x2, y2 = clip
+    full = np.full((y2 - y1, x2 - x1), 255, np.uint8)
+    bx1, by1, bx2, by2 = box
+    pad = bx1 - x1 if bx1 - x1 == by1 - y1 else dilate
+    m = stroke_mask(gray, box, pad=pad)
+    if m is None or m.shape != full.shape:
+        return full
+    k = max(9, int(min(bx2 - bx1, by2 - by1) * 0.25)) | 1
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    m = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dilate + 1, 2 * dilate + 1)))
+    cover = float((m > 0).mean())
+    if cover < 0.05 or cover > 0.85:
+        return full
+    return m
 
 
 def _drop_line_parts(mask: np.ndarray, long_ratio: float = 3.0, fill_max: float = 0.22) -> np.ndarray:
@@ -272,6 +310,13 @@ def bubble_interior(gray: np.ndarray, r: Region, tol: int, margin: float = 0.06)
     h, w = sub.shape
     if h < 8 or w < 8:
         return None
+    # 검은 바탕 말풍선(흰 글씨)은 밝기를 뒤집어 '밝은 내부'로 만든다. 그대로 두면 글자 상자 모서리에
+    # 걸친 말풍선 바깥의 흰 종이에서 채우기를 시작해 바깥 여백을 내부로 잡는다(실측: 196쪽 검은
+    # 말풍선이 오른쪽 아래 모서리 93×104 조각으로 잡혀 글자가 밖에서 15px 로 그려짐).
+    # 지운 뒤라 글자 상자 안은 거의 말풍선 바탕색이다.
+    tb = gray[max(0, r.box[1]):r.box[3], max(0, r.box[0]):r.box[2]]
+    if tb.size and float(np.median(tb)) < 100:
+        sub = 255 - sub
     cx, cy = (r.box[0] + r.box[2]) // 2 - x0, (r.box[1] + r.box[3]) // 2 - y0
     cx, cy = int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))
     if sub[cy, cx] < 160:  # 글자 위일 수 있으니 박스 안에서 밝은 점을 찾는다
@@ -460,8 +505,10 @@ class Eraser:
 
         # 기울기는 지우기 전 원본에서 잰다 (지우는 도중에는 이웃 글자가 이미 사라져 있을 수 있다)
         orig_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        pixel_style_check(orig_gray, page)        # 획이 고른 글자는 모델 판정과 달라도 인쇄체로
         for r in page.regions:
             r.angle, r.rot_box = 0.0, None
+            r.writing = _label_writing(r, self.cfg)
             # 기울기는 글줄에서 나온다. 기호를 뺀 글자가 3자 미만이면('ん♡') 글줄이라 할 수 없다
             if (r.render and r.erase != "none" and self.cfg.render.follow_angle
                     and len(re.findall(r"\w", r.text_ja)) >= 3):
@@ -485,7 +532,8 @@ class Eraser:
                                   lama_mask=lama_mask if e.lama else None)
             elif r.erase == "lama":
                 x1, y1, x2, y2 = _clip(r.box, w, h, e.lama_dilate)
-                lama_mask[y1:y2, x1:x2] = 255
+                lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2],
+                                                     _art_text_mask(orig_gray, r.box, e.lama_dilate, (x1, y1, x2, y2)))
 
         if lama_mask.any() and e.lama:
             try:
@@ -550,6 +598,9 @@ class Eraser:
             if not ext:
                 r.angle = 0.0
                 continue
+            if r.writing != "auto":      # 세로 라벨: 세운 글자 덩어리 크기 그대로 (넓히지 않으니 이웃과 안 겹친다)
+                r.rot_box = [round(v, 1) for v in ext]
+                continue
             fit = _rotated_fit(r.target_box, ext[2] + (r.target_box[2] - r.target_box[0]) - (r.box[2] - r.box[0]),
                                ext[3], r.angle)
             if fit is None:
@@ -571,6 +622,12 @@ class Eraser:
             return None                                # 글자 박스보다 작은 영역이면 말풍선 내부가 아니다
         body = bubble_body(interior)
         if body is None or body[2] - body[0] < 10 or body[3] - body[1] < 10:
+            return None
+        # 본체는 원문 글자를 품고 있어야 한다. 글자 상자와 거의 안 겹치면 엉뚱한 곳(말풍선 바깥 여백,
+        # 옆 칸)을 잰 것이므로 버리고 탐지기의 말풍선 상자로 물러난다.
+        bx1, by1, bx2, by2 = r.box
+        ov = max(0, min(bx2, body[2]) - max(bx1, body[0])) * max(0, min(by2, body[3]) - max(by1, body[1]))
+        if ov < 0.5 * box_area:
             return None
         r.body_box = _blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit)
         return body
@@ -657,6 +714,9 @@ def assign_target_boxes(page: Page, cfg: Config, margin: int = 10) -> None:
             continue
         if r.target_box:                 # 말풍선 넓히기가 이미 정한 것은 그대로 둔다
             fixed.append(list(r.target_box))
+        elif r.writing != "auto":        # 세로로 그리는 라벨은 원문 자리 그대로 (옆으로 넓히지 않는다)
+            r.target_box = [max(0, r.box[0]), max(0, r.box[1]), min(page.width, r.box[2]), min(page.height, r.box[3])]
+            fixed.append(list(r.target_box))
         elif (r.body_box or r.bubble_box) and r.kind == "bubble_text":
             r.target_box = _bubble_inner_box(r, rc.bubble_inner_margin, page.width, page.height)
             fixed.append(list(r.target_box))
@@ -693,7 +753,7 @@ def assign_target_boxes(page: Page, cfg: Config, margin: int = 10) -> None:
         r.target_box = [x1 - left, y1, x2 + right, y2]
 
     drawn = [r for r in page.regions if r.render and r.target_box]
-    _stack_overlapping([r for r in drawn if _in_bubble(r)])
+    _stack_overlapping([r for r in drawn if _in_bubble(r)], sizer=_make_sizer(page, cfg))
     _separate_leftovers(drawn)
 
 
@@ -720,8 +780,46 @@ def _rotated_fit(target: list[int], want_w: float, want_h: float, angle: float,
     return (tx1 + tx2) / 2, (ty1 + ty2) / 2, best[0], best[1]
 
 
+def _make_sizer(page: Page, cfg: Config):
+    """(영역, 폭, 높이) → 그 상자에 번역문을 넣었을 때의 글자 크기. 렌더러와 같은 기준 크기·최소 크기를
+    쓰되 글꼴은 기본 글꼴로 어림한다(겹친 말풍선 둘을 비교하는 용도라 상대값이면 충분하다)."""
+    rc = cfg.render
+    base = max(8, int(page.height * rc.font_ratio))
+    minimum = max(6, int(page.height * rc.min_font_ratio))
+    font_path = str(cfg.abs(cfg.paths.font))
+
+    def size(r: Region, w: int, h: int) -> int:
+        text = (r.text_ko or "").replace("…", "...").strip()
+        if not text:
+            return base
+        s, _, overflow = fit_text(text, font_path, max(10, w), max(10, h), base, minimum,
+                                  rc.line_spacing, fallback=font_path)
+        return s // 2 if overflow else s
+    return size
+
+
+def _best_cut(up: Region, dn: Region, lo: int, hi: int, gap: int, min_h: int, sizer) -> int | None:
+    """겹친 구간 [lo, hi] 안에서 위(up)·아래(dn) 상자를 가를 y. 두 번역문의 글자 크기 중 작은 쪽이
+    가장 커지는 곳, 같으면 두 크기 차가 작은 곳, 그래도 같으면 가운데에 가까운 곳."""
+    ux1, uy1, ux2, _ = up.target_box        # type: ignore[misc]
+    dx1, _, dx2, dy2 = dn.target_box        # type: ignore[misc]
+    mid = (lo + hi) / 2
+    best, best_key = None, None
+    step = max(2, (hi - lo) // 20)
+    for c in range(lo, hi + 1, step):
+        a_h, b_h = c - gap - uy1, dy2 - (c + gap)
+        if a_h < min_h or b_h < min_h:
+            continue
+        sa, sb = sizer(up, ux2 - ux1, a_h), sizer(dn, dx2 - dx1, b_h)
+        key = (min(sa, sb), -abs(sa - sb), -abs(c - mid))
+        if best_key is None or key > best_key:
+            best, best_key = c, key
+    return best
+
+
 def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,
-                       min_ratio: float = 0.12, min_v: float = 0.5, rounds: int = 3) -> None:
+                       min_ratio: float = 0.12, min_v: float = 0.5, rounds: int = 3,
+                       sizer=None) -> None:
     """상자가 겹치는 말풍선 안 글자들을 세로로 나눠 갖게 한다.
 
     원문이 세로쓰기면 한 말풍선 안의 줄마다 다른 영역으로 탐지되곤 한다(구름 말풍선 하나에
@@ -729,6 +827,7 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,
     상자를 받아 글자가 같은 자리에 겹쳐 그려진다. 가로쓰기로 옮기면 위→아래가 자연스러우니
     세로로 나눈다.
 
+    나누는 위치는 겹친 구간 안에서 두 번역문의 글자 크기가 최대한 같아지는 곳이다(sizer).
     나누는 것은 '겹치는 구간'뿐이다. 그룹 전체 높이를 균등 분할하면 원래 겹치지도 않던 부분까지
     잘려 글자가 말풍선 아래쪽으로 몰린다. 위아래 순서는 상자의 세로 중심을 따르되, 중심이 거의
     같으면(한 말풍선에 나란히 쓰인 경우) 읽기 순서를 따른다."""
@@ -760,7 +859,11 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,
                     up, dn = (a, b) if key(a) <= key(b) else (b, a)
                 ux1, uy1, ux2, uy2 = up.target_box  # type: ignore[misc]
                 dx1, dy1, dx2, dy2 = dn.target_box  # type: ignore[misc]
-                mid = (uy2 + dy1) // 2
+                # 겹친 구간의 가운데에서 자르면 긴 문장이 든 쪽이 높이를 잃어 혼자 작아진다
+                # (실측: 11쪽 '다 큰 어른이 한심하네~♥' 22px, 옆의 '큭큭♥' 36px). 글자 양을 보고 자른다.
+                mid = _best_cut(up, dn, min(dy1, uy2), max(dy1, uy2), gap, min_h, sizer) if sizer else None
+                if mid is None:
+                    mid = (uy2 + dy1) // 2
                 nuy2, ndy1 = mid - gap, mid + gap
                 if nuy2 - uy1 < min_h or dy2 - ndy1 < min_h:
                     continue                        # 나누면 글자가 못 들어갈 만큼 좁다

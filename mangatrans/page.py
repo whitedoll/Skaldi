@@ -36,6 +36,7 @@ class Region(BaseModel):
     target_box: list[int] | None = None       # 글자를 넣을 영역 (말풍선 넓히기 등으로 조정된 값)
     angle: float = 0.0                        # 원문 글자 기울기(도, 반시계 +). 0 이면 똑바로 그린다
     rot_box: list[float] | None = None        # 기운 글자의 배치 상자: [중심x, 중심y, 폭, 높이] (세운 좌표의 크기)
+    writing: str = "auto"                     # auto(가로쓰기) | vertical(한 글자씩 세로로) | sideways(가로 한 줄을 90° 돌림)
     widened: bool = False                     # 말풍선을 넓혔는지
     overflow: bool = False                    # 최소 크기에서도 넘침
     refused: bool = False                     # 번역 거부·순화 감지
