@@ -18,7 +18,7 @@ from .config import Config
 from .order import pixel_style_check
 from .page import Page, Region
 from .skew import line_count, rotated_body, rotated_extent, text_angle
-from .textfit import fit_text, natural_width
+from .textfit import fit_text, fit_vertical, natural_width
 
 
 def _clip(box: list[int], w: int, h: int, pad: int) -> tuple[int, int, int, int]:
@@ -753,7 +753,14 @@ def assign_target_boxes(page: Page, cfg: Config, margin: int = 10) -> None:
         r.target_box = [x1 - left, y1, x2 + right, y2]
 
     drawn = [r for r in page.regions if r.render and r.target_box]
-    _stack_overlapping([r for r in drawn if _in_bubble(r)], sizer=_make_sizer(page, cfg))
+    in_bubble = [r for r in drawn if _in_bubble(r)]
+    for r in page.regions:
+        r.group = None
+    split_x, links = _stack_overlapping(in_bubble, sizer=_make_sizer(page, cfg))
+    _number_groups(in_bubble, links)
+    if rc.overlap_vertical != "off":
+        # 좌우로 나눈 것뿐 아니라 맞붙은 말풍선 묶음 전체. 나누지 않은 갈래도 좁고 길 수 있다(07_05_1 '흥♥흥♥')
+        _choose_columns([r for r in in_bubble if id(r) in split_x or r.group is not None], page, cfg)
     _separate_leftovers(drawn)
 
 
@@ -780,22 +787,62 @@ def _rotated_fit(target: list[int], want_w: float, want_h: float, angle: float,
     return (tx1 + tx2) / 2, (ty1 + ty2) / 2, best[0], best[1]
 
 
-def _make_sizer(page: Page, cfg: Config):
-    """(영역, 폭, 높이) → 그 상자에 번역문을 넣었을 때의 글자 크기. 렌더러와 같은 기준 크기·최소 크기를
-    쓰되 글꼴은 기본 글꼴로 어림한다(겹친 말풍선 둘을 비교하는 용도라 상대값이면 충분하다)."""
-    rc = cfg.render
-    base = max(8, int(page.height * rc.font_ratio))
-    minimum = max(6, int(page.height * rc.min_font_ratio))
-    font_path = str(cfg.abs(cfg.paths.font))
+class _Sizer:
+    """번역문을 상자에 넣었을 때의 글자 크기 어림. 렌더러와 같은 기준 크기·최소 크기를 쓰되 글꼴은
+    기본 글꼴로 어림한다(겹친 말풍선 둘을 비교하는 용도라 상대값이면 충분하다).
 
-    def size(r: Region, w: int, h: int) -> int:
-        text = (r.text_ko or "").replace("…", "...").strip()
+    sizer(r, w, h) 는 가로쓰기 크기(넘치면 절반으로 쳐서 벌점). column(r, w, h) 는 그 자리에 세로쓰기가
+    나은가, best(r, w, h) 는 세로쓰기까지 고려한 크기."""
+
+    def __init__(self, page: Page, cfg: Config, gain: float = 1.1, tall: float = 1.3, short_len: int = 6):
+        rc = cfg.render
+        self.mode = rc.overlap_vertical
+        self.spacing = rc.line_spacing
+        self.base = max(8, int(page.height * rc.font_ratio))
+        self.minimum = max(6, int(page.height * rc.min_font_ratio))
+        self.font_path = str(cfg.abs(cfg.paths.font))
+        self.gain, self.tall, self.short_len = gain, tall, short_len
+
+    @staticmethod
+    def _text(r: Region) -> str:
+        return (r.text_ko or "").replace("…", "...").strip()
+
+    def __call__(self, r: Region, w: int, h: int) -> int:
+        text = self._text(r)
         if not text:
-            return base
-        s, _, overflow = fit_text(text, font_path, max(10, w), max(10, h), base, minimum,
-                                  rc.line_spacing, fallback=font_path)
+            return self.base
+        s, _, overflow = fit_text(text, self.font_path, max(10, w), max(10, h), self.base, self.minimum,
+                                  self.spacing, fallback=self.font_path)
         return s // 2 if overflow else s
-    return size
+
+    def _vertical(self, r: Region, w: int, h: int) -> int | None:
+        """세로쓰기 크기. short 모드는 한 열에 다 들어가는 짧은 글(웃음·외침)만, 못 쓰면 None."""
+        text = self._text(r).replace("...", "…")
+        if not text or self.mode == "off" or h < self.tall * w:
+            return None
+        s, _, overflow = fit_vertical(text, max(10, w), max(10, h), self.base, self.minimum, self.spacing,
+                                      max_cols=1 if self.mode == "short" else None)
+        return None if overflow else s
+
+    def column(self, r: Region, w: int, h: int) -> bool:
+        vs = self._vertical(r, w, h)
+        if vs is None:
+            return False
+        hs = self(r, w, h)
+        # 웃음·외침처럼 아주 짧은 글(short_len 자 이하)은 크기가 같기만 해도 세로 한 열이 원문 모양에 가깝다.
+        # 그보다 긴 글이나 여러 열 세로쓰기는 한국어로 읽기 불편하니 확실히 커질 때만.
+        # (실측: 12_10_1 '알았으면 대답해!' 를 세로로 세우자 옆 대사 자리가 좁아져 줄이 늘었다)
+        short = len(re.sub(r"\s", "", self._text(r))) <= self.short_len
+        return vs >= hs if short else vs >= hs * self.gain
+
+    def best(self, r: Region, w: int, h: int) -> int:
+        hs = self(r, w, h)
+        vs = self._vertical(r, w, h) if self.column(r, w, h) else None
+        return max(hs, vs or 0)
+
+
+def _make_sizer(page: Page, cfg: Config) -> _Sizer:
+    return _Sizer(page, cfg)
 
 
 def _best_cut(up: Region, dn: Region, lo: int, hi: int, gap: int, min_h: int, sizer) -> int | None:
@@ -817,23 +864,63 @@ def _best_cut(up: Region, dn: Region, lo: int, hi: int, gap: int, min_h: int, si
     return best
 
 
-def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,
+def _side_by_side(a: Region, b: Region, min_y: float = 0.3, max_x: float = 0.25) -> bool:
+    """서로 다른 말풍선의 원문 글자가 좌우로 나란한가 (붙은 말풍선·여러 갈래 구름 말풍선).
+
+    같은 말풍선(bubble_box 가 같음) 안의 여러 열은 해당하지 않는다 — 그건 한 말풍선을 위아래로 나눠
+    쓰는 편이 자연스럽다."""
+    if a.bubble_box == b.bubble_box:
+        return False
+    yo = min(a.box[3], b.box[3]) - max(a.box[1], b.box[1])
+    xo = min(a.box[2], b.box[2]) - max(a.box[0], b.box[0])
+    return yo >= min_y * max(1, min(a.h(), b.h())) and xo <= max_x * max(1, min(a.w(), b.w()))
+
+
+def _side_cut(a: Region, b: Region, gap: int, min_w: int) -> dict[int, list[int]] | None:
+    """좌우로 나란한 두 영역을 두 원문 글자의 마주 보는 가장자리 사이에서 나눈 배치 상자 {id(r): 상자}.
+    나누면 한쪽이 min_w 보다 좁아지면 None."""
+    lf, rt = (a, b) if a.box[0] + a.box[2] <= b.box[0] + b.box[2] else (b, a)
+    lx1, ly1, lx2, ly2 = lf.target_box      # type: ignore[misc]
+    rx1, ry1, rx2, ry2 = rt.target_box      # type: ignore[misc]
+    cut = min(max((lf.box[2] + rt.box[0]) // 2, rx1), lx2)   # 배치 상자가 겹치는 구간 안으로 제한
+    nlx2, nrx1 = min(lx2, cut - gap), max(rx1, cut + gap)
+    if nlx2 - lx1 < min_w or rx2 - nrx1 < min_w:
+        return None
+    return {id(lf): [lx1, ly1, nlx2, ly2], id(rt): [nrx1, ry1, rx2, ry2]}
+
+
+def _smaller(boxes: dict[int, list[int]], pair: tuple[Region, Region], fit) -> int:
+    """나눈 두 상자에 각 번역문을 넣었을 때 작은 쪽 글자 크기."""
+    return min(fit(r, boxes[id(r)][2] - boxes[id(r)][0], boxes[id(r)][3] - boxes[id(r)][1]) for r in pair)
+
+
+def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min_w: int = 60,
                        min_ratio: float = 0.12, min_v: float = 0.5, rounds: int = 3,
-                       sizer=None) -> None:
-    """상자가 겹치는 말풍선 안 글자들을 세로로 나눠 갖게 한다.
+                       sizer=None) -> tuple[set[int], list[tuple[Region, Region]]]:
+    """상자가 겹치는 말풍선 안 글자들이 자리를 나눠 갖게 한다.
+    돌려주는 값: (좌우로 나눈 영역의 id(r) 집합, 자리를 나눈 영역 쌍 목록)
 
     원문이 세로쓰기면 한 말풍선 안의 줄마다 다른 영역으로 탐지되곤 한다(구름 말풍선 하나에
     '준짱' / '오랜만이야' / '다시 만나서 기뻐'). 그 영역들은 같은 말풍선을 가리키므로 똑같은
     상자를 받아 글자가 같은 자리에 겹쳐 그려진다. 가로쓰기로 옮기면 위→아래가 자연스러우니
     세로로 나눈다.
 
-    나누는 위치는 겹친 구간 안에서 두 번역문의 글자 크기가 최대한 같아지는 곳이다(sizer).
+    다만 서로 다른 말풍선이 좌우로 붙어 있으면(여러 갈래 구름 말풍선, 맞붙은 두 말풍선) 원문도 갈래마다
+    한 덩어리씩 옆으로 놓여 있다. 이걸 위아래로 나누면 오른쪽 갈래의 글자가 위에, 왼쪽 갈래의 글자가
+    아래에 몰려 원문 자리와 어긋나고 읽는 순서도 꼬인다(08_06_1 쪽 오른쪽 구름). 이때는 두 원문 글자
+    사이에서 좌우로 나눠 각자 자기 갈래에 남긴다. 단, 좁은 갈래에 긴 문장이 들어가 글자가 작아지면
+    위아래 분할을 쓴다(둘 중 작은 쪽 글자가 더 큰 방향). 좁고 길어진 자리에 짧은 웃음·외침이 들면
+    세로쓰기가 더 크게 들어가므로 _choose_columns 가 세로쓰기를 고른다.
+
+    위아래로 나누는 위치는 겹친 구간 안에서 두 번역문의 글자 크기가 최대한 같아지는 곳이다(sizer).
     나누는 것은 '겹치는 구간'뿐이다. 그룹 전체 높이를 균등 분할하면 원래 겹치지도 않던 부분까지
     잘려 글자가 말풍선 아래쪽으로 몰린다. 위아래 순서는 상자의 세로 중심을 따르되, 중심이 거의
     같으면(한 말풍선에 나란히 쓰인 경우) 읽기 순서를 따른다."""
     def key(r: Region) -> tuple:
         return (r.order if r.order is not None else 10_000, r.id)
 
+    split_x: set[int] = set()
+    links: list[tuple[Region, Region]] = []
     for _ in range(rounds):
         moved = False
         for i, a in enumerate(regions):
@@ -851,7 +938,11 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,
                     continue
                 small = min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))
                 if ow * oh < min_ratio * max(1, small):
-                    continue                        # 살짝 스치는 정도는 글자까지 겹치지 않는다
+                    # 살짝 스치는 정도는 글자까지 겹치지 않아 나누지 않는다. 다만 맞붙은 말풍선이라
+                    # 글자 크기는 맞춘다(07_05_1 구름: '흥♥흥♥' 56px 옆에 40px 대사)
+                    if all(not (a is x and b is y) for x, y in links):
+                        links.append((a, b))
+                    continue
                 acy, bcy = (ay1 + ay2) / 2, (by1 + by2) / 2
                 if abs(acy - bcy) >= 20:
                     up, dn = (a, b) if acy < bcy else (b, a)
@@ -865,13 +956,58 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28,
                 if mid is None:
                     mid = (uy2 + dy1) // 2
                 nuy2, ndy1 = mid - gap, mid + gap
-                if nuy2 - uy1 < min_h or dy2 - ndy1 < min_h:
-                    continue                        # 나누면 글자가 못 들어갈 만큼 좁다
-                up.target_box = [ux1, uy1, ux2, nuy2]
-                dn.target_box = [dx1, ndy1, dx2, dy2]
+                stack = None
+                if nuy2 - uy1 >= min_h and dy2 - ndy1 >= min_h:   # 나눠도 글자가 들어갈 만큼 높은가
+                    stack = {id(up): [ux1, uy1, ux2, nuy2], id(dn): [dx1, ndy1, dx2, dy2]}
+                side = _side_cut(a, b, gap, min_w) if _side_by_side(a, b) else None
+                # 좌우 분할(자기 갈래에 남김)과 위아래 분할 중 작은 쪽 글자가 더 큰 것. 같으면 좌우
+                if side and sizer is not None and stack is not None and (
+                        _smaller(side, (a, b), sizer.best) < _smaller(stack, (a, b), sizer)):
+                    side = None
+                if side:
+                    a.target_box, b.target_box = side[id(a)], side[id(b)]
+                    split_x.update((id(a), id(b)))
+                elif stack:
+                    up.target_box, dn.target_box = stack[id(up)], stack[id(dn)]
+                else:
+                    continue
+                if all(not (a is x and b is y) for x, y in links):
+                    links.append((a, b))
                 moved = True
         if not moved:
             break
+    return split_x, links
+
+
+def _number_groups(regions: list[Region], links: list[tuple[Region, Region]]) -> None:
+    """자리를 나눈 영역끼리 같은 묶음 번호(r.group)를 준다. 렌더러가 묶음 안 글자 크기를 가장 작은 쪽에 맞춘다.
+    한 구름 말풍선을 나눠 쓴 글자들이 32·32·40px 처럼 제각각이면 원문(모두 같은 크기)과 달리 어수선하다."""
+    parent = {id(r): id(r) for r in regions}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for a, b in links:
+        parent[find(id(a))] = find(id(b))
+    roots: dict[int, int] = {}
+    for r in regions:
+        if any(r is a or r is b for a, b in links):
+            r.group = roots.setdefault(find(id(r)), len(roots))
+
+
+def _choose_columns(regions: list[Region], page: Page, cfg: Config) -> None:
+    """맞붙은 말풍선 갈래처럼 좁고 긴 자리에서 세로쓰기(writing='vcols')가 나은 영역을 고른다.
+
+    원문은 세로쓰기라 갈래마다 좁고 긴 자리를 차지한다. 거기에 짧은 웃음·외침('아하하하 ㅋ')을 가로로
+    넣으면 한 줄이 자리 폭을 넘어 글자가 작아지거나 잘게 쪼개진다. 세로 한 열이면 원문 모양 그대로 들어간다.
+    판정 기준은 _stack_overlapping 이 나눌 방향을 고를 때 쓴 것과 같다(_Sizer.column)."""
+    sizer = _make_sizer(page, cfg)
+    for r in regions:
+        x1, y1, x2, y2 = r.target_box            # type: ignore[misc]
+        if sizer.column(r, x2 - x1, y2 - y1):
+            r.writing = "vcols"
 
 
 def _in_bubble(r: Region) -> bool:

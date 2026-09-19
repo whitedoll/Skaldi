@@ -86,14 +86,28 @@ class PillowRenderer:
         rc = self.cfg.render
         base = max(8, int(page.height * rc.font_ratio))
         minimum = max(6, int(page.height * rc.min_font_ratio))
-        for r in page.regions:
-            if not r.render or not r.text_ko.strip():
-                continue
+        todo = [r for r in page.regions if r.render and r.text_ko.strip()]
+        for r in todo:
             # 정규화 이전에 만든 JSON 으로 다시 그릴 때도 표기를 정리한다 (여러 번 해도 결과가 같다).
             # 폰트가 '…'를 가운데 점(⋯)으로 그려 좁은 말풍선에서 콜론처럼 보이므로 '...'로 통일
             r.text_ko = normalize_ko(r.text_ko).replace("…", "...").replace("‥", "..")
-            self._draw_region(img, r, page, base, minimum)
+        caps = self._group_caps(page, base, minimum)
+        for r in todo:
+            self._draw_region(img, r, page, base, minimum, cap=caps.get(r.group))
         return img
+
+    def _group_caps(self, page: Page, base: int, minimum: int) -> dict[int, int]:
+        """겹친 말풍선 묶음(r.group)마다 글자 크기 상한 = 묶음에서 가장 작게 들어가는 크기.
+        빈 캔버스에 한 번 그려 보고 실제 크기를 잰다(그리기는 영역당 수 ms 라 두 번 해도 싸다)."""
+        caps: dict[int, int] = {}
+        scratch = Image.new("RGB", (page.width, page.height))
+        for r in page.regions:
+            if r.group is None or not r.render or not r.text_ko.strip():
+                continue
+            self._draw_region(scratch, r, page, base, minimum)
+            if r.font_size:
+                caps[r.group] = min(caps.get(r.group, r.font_size), r.font_size)
+        return caps
 
     def _glyph_masks(self, stroke_m: Image.Image | None, fill_m: Image.Image, x: float, y: float,
                      text: str, font_path: str, size: int, outline_w: int, bold_w: int) -> float:
@@ -116,7 +130,8 @@ class PillowRenderer:
             x += df.textlength(chunk, font=f)
         return x
 
-    def _draw_region(self, img: Image.Image, r: Region, page: Page, base: int, minimum: int) -> None:
+    def _draw_region(self, img: Image.Image, r: Region, page: Page, base: int, minimum: int,
+                     cap: int | None = None) -> None:
         rc = self.cfg.render
         angle = r.angle if (r.angle and r.rot_box) else 0.0
         if angle:                                   # 기운 글자: 세운 좌표의 상자에 맞추고 나중에 돌린다
@@ -133,6 +148,8 @@ class PillowRenderer:
         font_path, fscale = self.pick_font(r)
         fake_bold = r.weight == "bold" and r.style in set(rc.fake_bold_styles)
         base, minimum = max(6, int(base * fscale)), max(6, int(minimum * fscale))
+        if cap:                                     # 같은 묶음(겹친 말풍선)의 글자 크기를 맞춘다
+            base = max(minimum, min(base, cap))
 
         # 원문이 세로 한 열인 라벨(r.writing): 세로 제목은 원래 크게 쓰므로 기준 크기 대신 자리 폭을 상한으로
         label_col = r.writing in ("vertical", "sideways")
@@ -141,7 +158,7 @@ class PillowRenderer:
         if r.writing == "sideways":                 # 가로 한 줄을 시계 방향으로 90° 돌린다: 세운 상자에서 맞춘다
             box_w, box_h = box_h, box_w
             angle -= 90.0
-        vertical = r.writing == "vertical" or (
+        vertical = r.writing in ("vertical", "vcols") or (
             r.writing == "auto" and rc.vertical_for_narrow and box_h / box_w >= rc.narrow_ratio)
         if vertical:                                # 한 글자씩 세로로 (라벨은 원문처럼 한 열)
             text = r.text_ko.replace("...", "…").replace("..", "‥")

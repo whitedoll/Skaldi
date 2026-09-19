@@ -74,6 +74,8 @@ class RenderCfg(BaseModel):
     compare: bool = True
     vertical_for_narrow: bool = False   # 좁고 긴 상자는 세로쓰기
     narrow_ratio: float = 2.5           # 높이/폭 이 이 값 이상이면 '좁고 긴' 상자
+    overlap_vertical: str = "short"     # 좌우로 붙은 말풍선을 나눠 좁고 길어진 자리: short(한 열에 드는 짧은 웃음·외침만 세로)
+                                        # | all(여러 열 세로쓰기도 더 크게 들어가면) | off(항상 가로)
     match_style: bool = True            # 글꼴 계열 판정 (굵기는 이 값과 무관하게 항상 적용)
     match_color: bool = True            # 원문 획·외곽선 색을 따라감
     fonts: dict[str, str] = Field(default_factory=dict)        # {gothic, gothic_bold, mincho, mincho_bold, hand, hand_bold}

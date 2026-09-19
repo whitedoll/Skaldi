@@ -65,6 +65,7 @@ render:
   compare: true                 # both일 때 비교 이미지 저장
   vertical_for_narrow: false    # true면 높이/폭이 narrow_ratio 이상인 상자는 세로쓰기
   narrow_ratio: 2.5
+  overlap_vertical: short       # 좌우로 붙은 말풍선을 갈래별로 나눈 좁은 자리: short(한 열에 드는 웃음·외침만 세로) | all | off
   match_style: true             # 원문 글꼴 계열(고딕/명조/손글씨) 판정.
                                 # 거의 전부를 손글씨로 답하면 판정을 버리고 고딕으로 둔다.
                                 # 굵기(bold)는 이 값과 무관하게 항상 적용

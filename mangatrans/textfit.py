@@ -36,7 +36,14 @@ def has_glyph(path: str, ch: str) -> bool:
     if not ch.strip():
         return True
     try:
-        return font(path, 40).getmask(ch).getbbox() is not None
+        f = font(path, 40)
+        m = f.getmask(ch)
+        if m.getbbox() is None:
+            return False
+        # 없는 글자를 빈 네모(.notdef)로 그리는 폰트가 있다. 그 네모도 bbox 가 있어 '있음'으로 잘못 판정되면
+        # 세로 전용 자형(︙ ﹁)이 네모로 찍힌다(나눔스퀘어라운드). 확실히 없는 글자의 모양과 같으면 없는 것.
+        nd = f.getmask("\U0010FFFD")
+        return not (m.size == nd.size and bytes(m) == bytes(nd))
     except Exception:  # noqa: BLE001
         return False
 
