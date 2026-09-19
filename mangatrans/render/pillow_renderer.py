@@ -7,11 +7,11 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from ..config import Config
-from ..erase import region_target_box
+from ..erase import poly_mask, region_target_box
 from ..normalize import normalize_ko
 from ..page import Page, Region
-from ..textfit import (HALF_CELL_PUNCT, column_steps, fit_text, fit_vertical, font, has_glyph, split_runs,
-                       split_variation, text_width)
+from ..textfit import (HALF_CELL_PUNCT, column_steps, fit_polygon, fit_text, fit_vertical, font, has_glyph,
+                       split_runs, split_variation, text_width)
 
 # 세로쓰기에서 가로 모양 그대로 쓰면 어색한 문장부호: 세로 전용 자형(CJK 호환 형태)으로 바꾼다
 VERTICAL_FORMS = {
@@ -98,7 +98,11 @@ class PillowRenderer:
 
     def _group_caps(self, page: Page, base: int, minimum: int) -> dict[int, int]:
         """겹친 말풍선 묶음(r.group)마다 글자 크기 상한 = 묶음에서 가장 작게 들어가는 크기.
-        빈 캔버스에 한 번 그려 보고 실제 크기를 잰다(그리기는 영역당 수 ms 라 두 번 해도 싸다)."""
+        빈 캔버스에 한 번 그려 보고 실제 크기를 잰다(그리기는 영역당 수 ms 라 두 번 해도 싸다).
+        단 기준 크기의 group_floor 배 밑으로는 끌어내리지 않는다. 한 글이 좁은 자리에서 작아졌다고 넉넉한
+        이웃까지 따라 줄면 구름 전체가 작아진다(07_05_1: 39px 이던 글이 31px 로). 그보다 작은 글은
+        자기 자리에 맞는 크기로 그대로 그려진다."""
+        floor = int(base * self.cfg.render.group_floor)
         caps: dict[int, int] = {}
         scratch = Image.new("RGB", (page.width, page.height))
         for r in page.regions:
@@ -107,7 +111,7 @@ class PillowRenderer:
             self._draw_region(scratch, r, page, base, minimum)
             if r.font_size:
                 caps[r.group] = min(caps.get(r.group, r.font_size), r.font_size)
-        return caps
+        return {g: max(c, floor) for g, c in caps.items()}
 
     def _glyph_masks(self, stroke_m: Image.Image | None, fill_m: Image.Image, x: float, y: float,
                      text: str, font_path: str, size: int, outline_w: int, bold_w: int) -> float:
@@ -150,6 +154,9 @@ class PillowRenderer:
         base, minimum = max(6, int(base * fscale)), max(6, int(minimum * fscale))
         if cap:                                     # 같은 묶음(겹친 말풍선)의 글자 크기를 맞춘다
             base = max(minimum, min(base, cap))
+        if r.poly and r.writing == "auto" and self._draw_poly(img, r, font_path, base, minimum, ratio,
+                                                              fake_bold, fill, stroke_fill):
+            return
 
         # 원문이 세로 한 열인 라벨(r.writing): 세로 제목은 원래 크게 쓰므로 기준 크기 대신 자리 폭을 상한으로
         label_col = r.writing in ("vertical", "sideways")
@@ -225,6 +232,38 @@ class PillowRenderer:
         if stroke_m is not None:
             img.paste(stroke_fill, (px, py), masks[0])
         img.paste(fill, (px, py), masks[-1])
+
+    def _draw_poly(self, img: Image.Image, r: Region, font_path: str, base: int, minimum: int, ratio: float,
+                   fake_bold: bool, fill: tuple, stroke_fill: tuple) -> bool:
+        """겹친 말풍선에서 폴리곤 배치를 고른 영역: 줄마다 그 높이의 실제 폭을 써서 그린다. 못 맞추면 False
+        (호출부가 네모 배치로 그린다)."""
+        rc = self.cfg.render
+        m, x0, y0 = poly_mask(r.poly)               # type: ignore[arg-type]
+        f = fit_polygon(r.text_ko, font_path, m, base, minimum, rc.line_spacing, self.fallback_path)
+        if f is None:
+            return False
+        size, lines = f
+        r.font_size, r.overflow, r.vertical = size, False, False
+        outline_w = max(1, round(size * ratio)) if ratio > 0 else 0
+        bold_w = max(1, round(size * rc.fake_bold_ratio)) if fake_bold else 0
+        ss = 3 if size < rc.supersample_below else 1
+        S, ow, bw_ = size * ss, outline_w * ss, bold_w * ss
+        edge = (outline_w + bold_w + 2) * ss
+        H, W = m.shape
+        stroke_m = Image.new("L", (W * ss + 2 * edge, H * ss + 2 * edge + S), 0) if outline_w else None
+        fill_m = Image.new("L", (W * ss + 2 * edge, H * ss + 2 * edge + S), 0)
+        for text, cx, y in lines:
+            w = text_width(text, font_path, S, self.fallback_path)
+            self._glyph_masks(stroke_m, fill_m, cx * ss + edge - w / 2, y * ss + edge, text, font_path, S, ow, bw_)
+        masks = [mk for mk in (stroke_m, fill_m) if mk is not None]
+        if ss > 1:
+            masks = [mk.resize((max(1, round(mk.width / ss)), max(1, round(mk.height / ss))), Image.LANCZOS)
+                     for mk in masks]
+        px, py = x0 - edge // ss, y0 - edge // ss
+        if stroke_m is not None:
+            img.paste(stroke_fill, (px, py), masks[0])
+        img.paste(fill, (px, py), masks[-1])
+        return True
 
     def _vertical_glyph(self, stroke_m: Image.Image | None, fill_m: Image.Image, ccx: float, y: float,
                         ch: str, font_path: str, size: int, ow: int, bw_: int) -> None:

@@ -76,6 +76,9 @@ class RenderCfg(BaseModel):
     compare: bool = True
     vertical_for_narrow: bool = False   # 좁고 긴 상자는 세로쓰기
     narrow_ratio: float = 2.5           # 높이/폭 이 이 값 이상이면 '좁고 긴' 상자
+    overlap_layout: str = "auto"        # 겹친 말풍선 글자 자리: auto(네모·폴리곤 중 작은 글자가 더 큰 쪽, 같으면 네모) | rect | poly
+    vertical_short_len: int = 8         # short 모드에서 세로 한 열로 쓸 수 있는 글자 수 (한글·영숫자만 셈)
+    group_floor: float = 0.85           # 한 구름 묶음의 글자 크기를 맞출 때 기준 크기의 이 배 밑으로는 내리지 않음
     overlap_vertical: str = "short"     # 좌우로 붙은 말풍선을 나눠 좁고 길어진 자리: short(한 열에 드는 짧은 웃음·외침만 세로)
                                         # | all(여러 열 세로쓰기도 더 크게 들어가면) | off(항상 가로)
     match_style: bool = True            # 글꼴 계열 판정 (굵기는 이 값과 무관하게 항상 적용)

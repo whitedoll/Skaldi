@@ -37,6 +37,7 @@ class Region(BaseModel):
     angle: float = 0.0                        # 원문 글자 기울기(도, 반시계 +). 0 이면 똑바로 그린다
     rot_box: list[float] | None = None        # 기운 글자의 배치 상자: [중심x, 중심y, 폭, 높이] (세운 좌표의 크기)
     writing: str = "auto"                     # auto(가로쓰기) | vertical(세로 한 열 라벨) | vcols(여러 열 세로쓰기) | sideways(가로 한 줄을 90° 돌림)
+    poly: list[list[int]] | None = None       # 겹친 말풍선에서 폴리곤 배치를 고른 경우의 글자 자리 다각형 [[x, y], ...]
     group: int | None = None                  # 겹친 말풍선을 나눠 쓴 묶음 번호. 같은 묶음은 글자 크기를 맞춘다
     widened: bool = False                     # 말풍선을 넓혔는지
     overflow: bool = False                    # 최소 크기에서도 넘침

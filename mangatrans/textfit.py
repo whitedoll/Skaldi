@@ -272,3 +272,92 @@ def fit_vertical(text: str, box_w: int, box_h: int, base: int, minimum: int,
         if size <= minimum:
             return size, cols, True
         size = max(minimum, size - max(1, size // 12))
+
+
+# ---- 다각형 자리 (겹친 말풍선의 폴리곤 배치) -------------------------------------
+
+def _band_run(mask, y0: int, y1: int) -> tuple[int, int] | None:
+    """띠 [y0, y1) 의 모든 행에서 마스크 안인 열 중 가장 긴 연속 구간 (x1, x2)."""
+    import numpy as np
+
+    band = mask[max(0, y0):y1]
+    if band.shape[0] == 0:
+        return None
+    ok = np.concatenate([[0], band.all(axis=0).astype(np.int8), [0]])
+    d = np.diff(ok)
+    starts, ends = np.where(d == 1)[0], np.where(d == -1)[0]
+    if len(starts) == 0:
+        return None
+    k = int(np.argmax(ends - starts))
+    return int(starts[k]), int(ends[k])
+
+
+def _poly_attempt(text: str, font_path: str, mask, size: int, spacing: float, fallback: str | None,
+                  step: int = 3) -> list[tuple[str, float, int]] | None:
+    """size 로 마스크 안에 줄마다 그 높이의 실제 폭만큼 채운다. 블록 중심이 마스크 무게중심에 가장 가까운
+    시작 높이를 고른다. 돌려주는 값: [(줄, 중심 x, 위쪽 y)] (마스크 좌표) 또는 None."""
+    import numpy as np
+
+    ys = np.where(mask.any(axis=1))[0]
+    if len(ys) == 0:
+        return None
+    cy = float(np.where(mask)[0].mean())
+    words = [w for w in text.replace("\n", " ").split(" ") if w]
+    lh = int(size * spacing)
+    tl = lambda t: text_width(t, font_path, size, fallback)  # noqa: E731
+    runs: dict[int, tuple[int, int] | None] = {}
+    best = None
+    for top in range(int(ys[0]), int(ys[-1]) - size + 1, step):
+        lines, y, queue = [], top, list(words)
+        while queue:
+            if y not in runs:
+                runs[y] = _band_run(mask, y, y + size)
+            run = runs[y]
+            if run is None or run[1] - run[0] < size:
+                break
+            wmax = run[1] - run[0]
+            cur = ""
+            while queue:
+                cand = (cur + " " + queue[0]) if cur else queue[0]
+                if tl(cand) <= wmax:
+                    cur = cand
+                    queue.pop(0)
+                    continue
+                if not cur:                         # 한 단어가 폭을 넘으면 조사·어미 단위로만 끊는다
+                    soft = split_word_soft(queue[0], tl, wmax)
+                    if soft and len(soft) >= 2:
+                        cur, queue[0] = soft[0], "".join(soft[1:])
+                break
+            if not cur:
+                break
+            lines.append((cur, (run[0] + run[1]) / 2, y))
+            y += lh
+        if queue:
+            continue
+        d = abs(top + len(lines) * lh / 2 - cy)
+        if best is None or d < best[0]:
+            best = (d, lines)
+    return best[1] if best else None
+
+
+def fit_polygon(text: str, font_path: str, mask, base: int, minimum: int, spacing: float,
+                fallback: str | None = None) -> tuple[int, list[tuple[str, float, int]]] | None:
+    """다각형 마스크(bool 2차원 배열) 안에 들어가는 가장 큰 크기와 줄 배치. 최소 크기에서도 안 되면 None.
+
+    네모 상자는 말풍선 안에 '완전히 들어가는 사각형'이라 둥근 모서리·불룩한 부분을 버린다. 다각형은 줄마다
+    그 높이에서 실제로 쓸 수 있는 폭을 써서, 가시형·한쪽이 불룩한 말풍선에서 더 크게 들어간다
+    (02_00_1 가시 말풍선: 네모 31px, 다각형 40px)."""
+    minimum = min(minimum, base)
+    if _poly_attempt(text, font_path, mask, minimum, spacing, fallback) is None:
+        return None
+    lo, hi = minimum, base
+    if _poly_attempt(text, font_path, mask, base, spacing, fallback) is not None:
+        lo = base
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if _poly_attempt(text, font_path, mask, mid, spacing, fallback) is not None:
+            lo = mid
+        else:
+            hi = mid
+    lines = _poly_attempt(text, font_path, mask, lo, spacing, fallback, step=1)
+    return (lo, lines) if lines else None

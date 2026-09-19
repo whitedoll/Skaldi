@@ -18,7 +18,7 @@ from .config import Config
 from .order import pixel_style_check
 from .page import Page, Region
 from .skew import line_count, rotated_body, rotated_extent, text_angle
-from .textfit import fit_text, fit_vertical, natural_width
+from .textfit import fit_polygon, fit_text, fit_vertical, natural_width
 
 
 def _clip(box: list[int], w: int, h: int, pad: int) -> tuple[int, int, int, int]:
@@ -569,6 +569,12 @@ class Eraser:
             except Exception as ex:  # noqa: BLE001
                 page.warnings.append(f"말풍선 넓히기 실패 (id={r.id}): {ex}")
         assign_target_boxes(page, self.cfg)
+        try:
+            assign_polygons(page, self.cfg, gray)
+        except Exception as ex:  # noqa: BLE001
+            page.warnings.append(f"폴리곤 배치 실패, 네모로 둠: {ex}")
+            for r in page.regions:
+                r.poly = None
         self._assign_rot_boxes(page, orig_gray, tilted)
         return Image.fromarray(img)
 
@@ -757,6 +763,12 @@ def assign_target_boxes(page: Page, cfg: Config, margin: int = 10) -> None:
     for r in page.regions:
         r.group = None
     split_x, links = _stack_overlapping(in_bubble, sizer=_make_sizer(page, cfg))
+    # 탐지기는 합쳐진 구름 말풍선을 갈래마다 따로 잡는다. 말풍선 상자가 맞닿은 영역은 자리를 나누지 않았어도
+    # 한 구름이므로 같은 묶음으로 본다(07_05_1 왼쪽 구름의 '자지♥♥ 너무 길어서♥♥' 만 40px 로 따로 놂)
+    for i, a in enumerate(in_bubble):
+        for b in in_bubble[i + 1:]:
+            if a.bubble_box and b.bubble_box and a.bubble_box != b.bubble_box and _touch(a.bubble_box, b.bubble_box):
+                links.append((a, b))
     _number_groups(in_bubble, links)
     if rc.overlap_vertical != "off":
         # 좌우로 나눈 것뿐 아니라 맞붙은 말풍선 묶음 전체. 나누지 않은 갈래도 좁고 길 수 있다(07_05_1 '흥♥흥♥')
@@ -787,6 +799,9 @@ def _rotated_fit(target: list[int], want_w: float, want_h: float, angle: float,
     return (tx1 + tx2) / 2, (ty1 + ty2) / 2, best[0], best[1]
 
 
+_LETTERS = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣA-Za-z0-9぀-ヿ一-鿿]")
+
+
 class _Sizer:
     """번역문을 상자에 넣었을 때의 글자 크기 어림. 렌더러와 같은 기준 크기·최소 크기를 쓰되 글꼴은
     기본 글꼴로 어림한다(겹친 말풍선 둘을 비교하는 용도라 상대값이면 충분하다).
@@ -794,14 +809,14 @@ class _Sizer:
     sizer(r, w, h) 는 가로쓰기 크기(넘치면 절반으로 쳐서 벌점). column(r, w, h) 는 그 자리에 세로쓰기가
     나은가, best(r, w, h) 는 세로쓰기까지 고려한 크기."""
 
-    def __init__(self, page: Page, cfg: Config, gain: float = 1.1, tall: float = 1.3, short_len: int = 6):
+    def __init__(self, page: Page, cfg: Config, gain: float = 1.1, tall: float = 1.3):
         rc = cfg.render
         self.mode = rc.overlap_vertical
         self.spacing = rc.line_spacing
         self.base = max(8, int(page.height * rc.font_ratio))
         self.minimum = max(6, int(page.height * rc.min_font_ratio))
         self.font_path = str(cfg.abs(cfg.paths.font))
-        self.gain, self.tall, self.short_len = gain, tall, short_len
+        self.gain, self.tall, self.short_len = gain, tall, rc.vertical_short_len
 
     @staticmethod
     def _text(r: Region) -> str:
@@ -829,11 +844,13 @@ class _Sizer:
         if vs is None:
             return False
         hs = self(r, w, h)
-        # short 모드: 웃음·외침처럼 아주 짧은 글(short_len 자 이하)만, 크기가 같기만 해도 세로 한 열.
+        # short 모드: 웃음·외침처럼 아주 짧은 글(글자 short_len 자 이하)만, 크기가 같기만 해도 세로 한 열.
+        # 글자 수는 한글·영숫자만 센다. ♥ ~ ! ? 까지 세면 '어떡해애~♥♥♥'(4자)가 8자로 쳐져 세로 후보에서 빠지고,
+        # 좁은 갈래에 가로로 넣다 작아져 07_05_1 왼쪽 구름 전체가 위아래 분할로 되돌아갔다.
         # 긴 대사를 세로로 세우면 한국어로 읽기 불편하다(08_06_1 '어떡해♥♥ 못 이기겠어어♥♥' 가 두 열 세로로
         # 그려짐; 12_10_1 '알았으면 대답해!' 를 세우자 옆 대사 자리가 좁아짐). all 모드는 확실히 커질 때 세로.
         if self.mode == "short":
-            return len(re.sub(r"\s", "", self._text(r))) <= self.short_len and vs >= hs
+            return len(_LETTERS.findall(self._text(r))) <= self.short_len and vs >= hs
         return vs >= hs * self.gain
 
     def best(self, r: Region, w: int, h: int) -> int:
@@ -991,6 +1008,11 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min
     return split_x, links
 
 
+def _touch(p: list[int], q: list[int]) -> bool:
+    """두 상자가 겹치는가(넓이 > 0)."""
+    return min(p[2], q[2]) > max(p[0], q[0]) and min(p[3], q[3]) > max(p[1], q[1])
+
+
 def _number_groups(regions: list[Region], links: list[tuple[Region, Region]]) -> None:
     """자리를 나눈 영역끼리 같은 묶음 번호(r.group)를 준다. 렌더러가 묶음 안 글자 크기를 가장 작은 쪽에 맞춘다.
     한 구름 말풍선을 나눠 쓴 글자들이 32·32·40px 처럼 제각각이면 원문(모두 같은 크기)과 달리 어수선하다."""
@@ -1092,3 +1114,116 @@ def region_target_box(r: Region, cfg: Config, page_w: int, page_h: int) -> list[
         extra = max(0, int(bh * 0.6) - bw) // 2
         box = [x1 - extra, y1, x2 + extra, y2]
     return [max(0, box[0]), max(0, box[1]), min(page_w, box[2]), min(page_h, box[3])]
+
+
+# ---- 겹친 말풍선의 폴리곤 배치 ------------------------------------------------
+
+def _group_polygons(rs: list[Region], gray: np.ndarray, margin: int, tol: int) -> dict[int, np.ndarray]:
+    """한 구름 묶음의 실제 내부를 영역별 다각형 마스크로 나눈다. {id(r): 페이지 크기 bool 마스크}
+
+    - 내부: 각 영역에서 flood fill 한 말풍선 내부의 합집합
+    - 꼬리 제거: 열림(opening) 연산으로 가는 돌출부를 떼어 낸다. 꼬리까지 넣으면 무게중심이 끌려 글이
+      아래로 처진다(04_02_1 '그랬었나…?')
+    - 나누기: 각 픽셀을 원문 글자 상자까지의 거리 ÷ 글 양 가중치가 가장 작은 영역에 준다. 가까운 쪽으로만
+      나누면 글이 긴 쪽이 좁은 조각을 받는다
+    - 여백: margin 만큼 깎는다. 안 깎으면 글자가 테두리에 닿는다(Tsusauto 038 '후후♡ 그야')"""
+    H, W = gray.shape
+    M = np.zeros((H, W), np.uint8)
+    for r in rs:
+        m = bubble_interior(gray, r, tol)
+        if m is not None:
+            M |= (m > 0).astype(np.uint8)
+    if not M.any():
+        return {}
+    ys, xs = np.where(M)
+    X0, Y0, X1, Y1 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    sub = M[Y0:Y1, X0:X1]
+    t = int(np.clip(min(X1 - X0, Y1 - Y0) * 0.08, 5, 40))
+    sub = cv2.morphologyEx(sub, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * t + 1, 2 * t + 1)))
+    lens = [max(1, len(_LETTERS.findall(r.text_ko or ""))) for r in rs]
+    mean = sum(lens) / len(lens)
+    dists = []
+    for r, n in zip(rs, lens):
+        inv = np.ones(sub.shape, np.uint8)
+        x1, y1, x2, y2 = r.box
+        inv[max(0, y1 - Y0):max(0, y2 - Y0), max(0, x1 - X0):max(0, x2 - X0)] = 0
+        dists.append(cv2.distanceTransform(inv, cv2.DIST_L2, 3) / math.sqrt(n / mean))
+    lab = np.argmin(np.stack(dists), axis=0)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * margin + 1, 2 * margin + 1))
+    out: dict[int, np.ndarray] = {}
+    for k, r in enumerate(rs):
+        m = cv2.erode(((sub > 0) & (lab == k)).astype(np.uint8), kernel)
+        n, cc = cv2.connectedComponents(m)
+        if n <= 1:
+            continue
+        # 원문 글자 상자와 가장 많이 겹치는 조각만 남긴다
+        x1, y1, x2, y2 = r.box
+        win = cc[max(0, y1 - Y0):max(0, y2 - Y0), max(0, x1 - X0):max(0, x2 - X0)]
+        counts = np.bincount(win.ravel(), minlength=n)[1:] if win.size else np.zeros(n - 1)
+        keep = int(np.argmax(counts)) + 1 if counts.any() else int(np.argmax(np.bincount(cc.ravel())[1:])) + 1
+        full = np.zeros((H, W), bool)
+        full[Y0:Y1, X0:X1] = cc == keep
+        out[id(r)] = full
+    return out
+
+
+def _mask_to_poly(mask: np.ndarray) -> list[list[int]] | None:
+    cs, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cs:
+        return None
+    c = cv2.approxPolyDP(max(cs, key=cv2.contourArea), 1.5, True).reshape(-1, 2)
+    return [[int(x), int(y)] for x, y in c] if len(c) >= 3 else None
+
+
+def poly_mask(poly: list[list[int]]) -> tuple[np.ndarray, int, int]:
+    """저장된 다각형 → (bool 마스크, 왼쪽 x, 위쪽 y). 마스크는 다각형을 감싸는 사각형 크기."""
+    pts = np.array(poly, np.int32)
+    x0, y0 = int(pts[:, 0].min()), int(pts[:, 1].min())
+    w, h = int(pts[:, 0].max()) - x0 + 1, int(pts[:, 1].max()) - y0 + 1
+    m = np.zeros((h, w), np.uint8)
+    cv2.fillPoly(m, [pts - [x0, y0]], 1)
+    return m > 0, x0, y0
+
+
+def assign_polygons(page: Page, cfg: Config, gray: np.ndarray) -> None:
+    """겹친 말풍선 묶음마다 네모 배치와 폴리곤 배치 중 나은 것을 고른다. 폴리곤을 고르면 r.poly 에 다각형을 둔다.
+
+    render.overlap_layout: auto(묶음에서 가장 작은 글자가 폴리곤 쪽이 더 크면 폴리곤, 같으면 네모) | rect | poly.
+    세로 한 열(vcols) 영역은 네모 그대로다. 실측(8쪽 16묶음): 가시형·한쪽이 불룩한 말풍선은 폴리곤이 크게
+    낫고(02_00_1 31→40px), 원문 세로 열을 따라 가는 띠로 나뉘는 구름에 긴 가로 글을 넣는 경우는 네모가
+    낫다(08_06_1 왼쪽 구름: 네모 32px, 폴리곤 25px)."""
+    rc = cfg.render
+    for r in page.regions:
+        r.poly = None
+    if rc.overlap_layout == "rect":
+        return
+    groups: dict[int, list[Region]] = {}
+    for r in page.regions:
+        if r.group is not None and r.render and r.text_ko.strip() and _in_bubble(r):
+            groups.setdefault(r.group, []).append(r)
+    sizer = _make_sizer(page, cfg)
+    margin = max(4, int(sizer.base * 0.4))
+    for rs in groups.values():
+        cands = [r for r in rs if r.writing == "auto" and r.target_box]
+        if len(rs) < 2 or not cands:
+            continue
+        masks = _group_polygons(rs, gray, margin, cfg.erase.flood_tolerance)
+        fits = {}
+        for r in cands:
+            if id(r) not in masks:
+                break
+            m = masks[id(r)]
+            ys, xs = np.where(m)
+            text = sizer._text(r)
+            f = fit_polygon(text, sizer.font_path, m[ys.min():ys.max() + 1, xs.min():xs.max() + 1],
+                            sizer.base, sizer.minimum, sizer.spacing, sizer.font_path)
+            if f is None:
+                break
+            fits[id(r)] = f[0]
+        else:
+            rect_min = min(sizer(r, r.target_box[2] - r.target_box[0], r.target_box[3] - r.target_box[1])
+                           for r in cands)
+            poly_min = min(fits.values())
+            if rc.overlap_layout == "poly" or poly_min > rect_min:
+                for r in cands:
+                    r.poly = _mask_to_poly(masks[id(r)])
