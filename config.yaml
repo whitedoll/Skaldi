@@ -1,0 +1,104 @@
+# 만화 번역 도구 설정. 경로는 프로젝트 루트 기준.
+
+paths:
+  models_dir: models            # 로컬로 내려받는 모델(Baberu OCR 등)
+  font: fonts/NanumSquareRoundB.ttf
+  glossary: glossary.yaml       # 루트 용어집. 입력 폴더의 glossary.yaml이 있으면 병합(폴더 우선)
+  output: output
+  output_suffix: _ko            # 결과 폴더·zip 이름: <입력이름><접미사>
+
+detector:
+  repo: ogkalu/comic-text-and-bubble-detector
+  threshold: 0.3
+  input_size: 640
+  device: cuda
+
+ocr:
+  backend: baberu               # baberu | llm
+  baberu_repo: genshiai-daichi/baberu-ocr
+  crop_padding: 4               # 글자 박스 크롭 여백(px)
+
+llm:
+  backend: ollama               # ollama | gemini (gemini는 번역 전용)
+  ollama_host: http://127.0.0.1:11434
+  # 역할별 모델. 벤치마크 결과로 조정한다.
+  vision_model: gemma4:12b      # 읽기 순서 판정, 말풍선 밖 글자 분류, LLM OCR 옵션
+  translate_model: gemma4:12b   # 번역 (벤치마크 1위, 거부 없음)
+  translate_fallbacks:          # 거부·순화 감지 시 순서대로 재시도
+    - qwen3.5:9b
+    - exaone3.5:7.8b
+  temperature: 0.1
+  page_long_side: 1536          # 비전 모델에 보내는 페이지 축소 크기
+  gemini_model: gemini-2.5-flash
+  gemini_api_key_env: GEMINI_API_KEY
+
+translate:
+  source_lang: 일본어
+  target_lang: 한국어
+
+erase:
+  bubble_padding: 6             # 글자 획 탐색 크롭 여백(px)
+  flood_fill: true              # (넓히기에서) 말풍선 내부를 flood fill로 찾음
+  flood_tolerance: 40           # flood fill 허용 밝기 차이
+  widen_bubbles: false          # 좁은 말풍선을 가로로 넓혀 다시 그림. 원본 말풍선을 그대로 두려면 false
+  widen_max_lines: 3            # 기준 크기에서 이 줄 수 이내로 들어가게 넓힘
+  widen_max_ratio: 0.6          # 원래 폭 대비 최대 확장 비율
+  widen_min_font_ratio: 0.8     # 기준 크기의 이 비율 이상으로 들어가면 넓히지 않음
+  lama: true                    # 그림 위 글자 인페인팅
+  lama_dilate: 8                # 인페인팅 마스크 팽창(px)
+
+render:
+  default: pillow               # pillow | anytext | qwen | both
+  font_ratio: 0.018             # 기준 폰트 크기 = 페이지 높이 × 비율
+  min_font_ratio: 0.011         # 최소 폰트 크기 비율
+  line_spacing: 1.15
+  bubble_inner_margin: 0.08     # 말풍선 박스 대비 안쪽 여백 비율
+  # 말풍선 곡선에 글자 상자를 맞추는 정도. 1=글자가 절대 말풍선을 안 벗어남(대신 상자가 좁아 글자도 작아짐),
+  # 0=본체 사각형 그대로(둥근 모서리로 크게 삐져나옴). 0.7이면 곡선에 살짝 걸치는 대신 글자를 키운다.
+  bubble_fit: 0.7
+  stroke_ratio: 0.15            # 그림 위 글자 흰 외곽선 두께(폰트 크기 대비)
+  bubble_stroke_ratio: 0.15     # 말풍선 안 글자 외곽선 두께 (0이면 외곽선 없음)
+  jpeg_quality: 95
+  compare: true                 # both일 때 비교 이미지 저장
+  vertical_for_narrow: false    # true면 높이/폭이 narrow_ratio 이상인 상자는 세로쓰기
+  narrow_ratio: 2.5
+  match_style: true             # 원문 글꼴 계열(고딕/명조/손글씨) 판정.
+                                # 거의 전부를 손글씨로 답하면 판정을 버리고 고딕으로 둔다.
+                                # 굵기(bold)는 이 값과 무관하게 항상 적용
+  match_color: true             # 원문 획 색·외곽선 색을 따라감 (컬러 페이지)
+  bold_stroke_ratio: 0.16       # 획 두께/글자 크기 비율이 이 값 이상이면 굵은 글씨로 봄
+  fake_bold_ratio: 0.025        # 굵은 자형이 없는 폰트(손글씨)의 획을 같은 색으로 덧대는 두께
+  fake_bold_styles: [hand]      # 이 계열에서 weight=bold 일 때 획을 두껍게
+  fonts:                        # 계열_굵기 → 폰트 파일 (없는 항목은 paths.font 로 대체)
+    gothic: fonts/NanumSquareRoundB.ttf
+    gothic_bold: fonts/NanumSquareRoundEB.ttf
+    mincho: fonts/NanumMyeongjo-Regular.ttf
+    mincho_bold: fonts/NanumMyeongjo-Bold.ttf
+    hand: fonts/NanumPenScript-Regular.ttf
+    hand_bold: fonts/NanumPenScript-Regular.ttf     # 붓 서체는 한글이 뭉개져 펜 서체를 씀
+    fallback: fonts/NanumSquareRoundB.ttf   # 손글씨 폰트에 없는 ♥ 〜 … 를 대신 그림
+  font_scale:                   # 폰트별 크기 보정
+    hand: 1.42
+    hand_bold: 1.42
+    mincho: 1.0
+
+anytext:
+  repo: tolgacangoz/anytext
+  controlnet_repo: tolgacangoz/anytext-controlnet
+  steps: 20
+  crop_size: 512
+
+qwen:
+  comfyui_dir: C:/ComfyUI
+  url: http://127.0.0.1:8188
+  autostart: true
+  lightning_lora: true
+  steps: 4                      # lightning_lora가 false면 40
+  crop_size: 768                # 클수록 느리다 (12GB VRAM에서 768 기준 말풍선당 약 5~8분)
+  timeout_sec: 900
+  extra_args: ["--reserve-vram", "0.6"]   # 자동 실행 인자
+  clip_device: cpu              # 텍스트 인코더를 CPU(RAM)에 두어 확산 모델이 VRAM에 남게 한다
+  unet_file: qwen-image-edit-2511-Q4_0.gguf                        # ComfyUI/models/unet
+  clip_file: qwen_2.5_vl_7b_fp8_scaled.safetensors                 # models/text_encoders
+  vae_file: qwen_image_vae.safetensors                             # models/vae
+  lora_file: Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors  # models/loras
