@@ -829,11 +829,12 @@ class _Sizer:
         if vs is None:
             return False
         hs = self(r, w, h)
-        # 웃음·외침처럼 아주 짧은 글(short_len 자 이하)은 크기가 같기만 해도 세로 한 열이 원문 모양에 가깝다.
-        # 그보다 긴 글이나 여러 열 세로쓰기는 한국어로 읽기 불편하니 확실히 커질 때만.
-        # (실측: 12_10_1 '알았으면 대답해!' 를 세로로 세우자 옆 대사 자리가 좁아져 줄이 늘었다)
-        short = len(re.sub(r"\s", "", self._text(r))) <= self.short_len
-        return vs >= hs if short else vs >= hs * self.gain
+        # short 모드: 웃음·외침처럼 아주 짧은 글(short_len 자 이하)만, 크기가 같기만 해도 세로 한 열.
+        # 긴 대사를 세로로 세우면 한국어로 읽기 불편하다(08_06_1 '어떡해♥♥ 못 이기겠어어♥♥' 가 두 열 세로로
+        # 그려짐; 12_10_1 '알았으면 대답해!' 를 세우자 옆 대사 자리가 좁아짐). all 모드는 확실히 커질 때 세로.
+        if self.mode == "short":
+            return len(re.sub(r"\s", "", self._text(r))) <= self.short_len and vs >= hs
+        return vs >= hs * self.gain
 
     def best(self, r: Region, w: int, h: int) -> int:
         hs = self(r, w, h)
@@ -845,17 +846,22 @@ def _make_sizer(page: Page, cfg: Config) -> _Sizer:
     return _Sizer(page, cfg)
 
 
-def _best_cut(up: Region, dn: Region, lo: int, hi: int, gap: int, min_h: int, sizer) -> int | None:
+def _best_cut(up: Region, dn: Region, lo: int, hi: int, gap: int, min_h: int, sizer,
+              keep: float = 0.3) -> int | None:
     """겹친 구간 [lo, hi] 안에서 위(up)·아래(dn) 상자를 가를 y. 두 번역문의 글자 크기 중 작은 쪽이
-    가장 커지는 곳, 같으면 두 크기 차가 작은 곳, 그래도 같으면 가운데에 가까운 곳."""
-    ux1, uy1, ux2, _ = up.target_box        # type: ignore[misc]
-    dx1, _, dx2, dy2 = dn.target_box        # type: ignore[misc]
+    가장 커지는 곳, 같으면 두 크기 차가 작은 곳, 그래도 같으면 가운데에 가까운 곳.
+
+    각 상자는 나누기 전 높이의 keep 배 이상을 남긴다. 짧은 글은 한두 줄 높이만 있어도 같은 크기로
+    들어가서, 말풍선 꼭대기의 얇은 띠에 몰리고 나머지가 텅 비는 일이 있었다(04_02_1: 높이 91px 띠)."""
+    ux1, uy1, ux2, uy2 = up.target_box      # type: ignore[misc]
+    dx1, dy1, dx2, dy2 = dn.target_box      # type: ignore[misc]
+    min_a, min_b = max(min_h, int((uy2 - uy1) * keep)), max(min_h, int((dy2 - dy1) * keep))
     mid = (lo + hi) / 2
     best, best_key = None, None
     step = max(2, (hi - lo) // 20)
     for c in range(lo, hi + 1, step):
         a_h, b_h = c - gap - uy1, dy2 - (c + gap)
-        if a_h < min_h or b_h < min_h:
+        if a_h < min_a or b_h < min_b:
             continue
         sa, sb = sizer(up, ux2 - ux1, a_h), sizer(dn, dx2 - dx1, b_h)
         key = (min(sa, sb), -abs(sa - sb), -abs(c - mid))
@@ -896,7 +902,7 @@ def _smaller(boxes: dict[int, list[int]], pair: tuple[Region, Region], fit) -> i
 
 def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min_w: int = 60,
                        min_ratio: float = 0.12, min_v: float = 0.5, rounds: int = 3,
-                       sizer=None) -> tuple[set[int], list[tuple[Region, Region]]]:
+                       sizer=None, side_margin: float = 1.1, side_keep: float = 0.85) -> tuple[set[int], list[tuple[Region, Region]]]:
     """상자가 겹치는 말풍선 안 글자들이 자리를 나눠 갖게 한다.
     돌려주는 값: (좌우로 나눈 영역의 id(r) 집합, 자리를 나눈 영역 쌍 목록)
 
@@ -905,11 +911,11 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min
     상자를 받아 글자가 같은 자리에 겹쳐 그려진다. 가로쓰기로 옮기면 위→아래가 자연스러우니
     세로로 나눈다.
 
-    다만 서로 다른 말풍선이 좌우로 붙어 있으면(여러 갈래 구름 말풍선, 맞붙은 두 말풍선) 원문도 갈래마다
+    다만 서로 다른 말풍선이 좌우로 붙어 있으면(탐지기는 합쳐진 구름 말풍선도 갈래마다 따로 잡는다)(여러 갈래 구름 말풍선, 맞붙은 두 말풍선) 원문도 갈래마다
     한 덩어리씩 옆으로 놓여 있다. 이걸 위아래로 나누면 오른쪽 갈래의 글자가 위에, 왼쪽 갈래의 글자가
     아래에 몰려 원문 자리와 어긋나고 읽는 순서도 꼬인다(08_06_1 쪽 오른쪽 구름). 이때는 두 원문 글자
-    사이에서 좌우로 나눠 각자 자기 갈래에 남긴다. 단, 좁은 갈래에 긴 문장이 들어가 글자가 작아지면
-    위아래 분할을 쓴다(둘 중 작은 쪽 글자가 더 큰 방향). 좁고 길어진 자리에 짧은 웃음·외침이 들면
+    사이에서 좌우로 나눠 각자 자기 갈래에 남긴다. 단, 좁은 갈래에 긴 문장이 들어가 글자가 확실히
+    작아지면(위아래 분할이 side_margin 배 이상 크고 좌우 글자가 기준 크기의 side_keep 배 미만) 위아래로 나눈다. 좁고 길어진 자리에 짧은 웃음·외침이 들면
     세로쓰기가 더 크게 들어가므로 _choose_columns 가 세로쓰기를 고른다.
 
     위아래로 나누는 위치는 겹친 구간 안에서 두 번역문의 글자 크기가 최대한 같아지는 곳이다(sizer).
@@ -960,10 +966,16 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min
                 if nuy2 - uy1 >= min_h and dy2 - ndy1 >= min_h:   # 나눠도 글자가 들어갈 만큼 높은가
                     stack = {id(up): [ux1, uy1, ux2, nuy2], id(dn): [dx1, ndy1, dx2, dy2]}
                 side = _side_cut(a, b, gap, min_w) if _side_by_side(a, b) else None
-                # 좌우 분할(자기 갈래에 남김)과 위아래 분할 중 작은 쪽 글자가 더 큰 것. 같으면 좌우
-                if side and sizer is not None and stack is not None and (
-                        _smaller(side, (a, b), sizer.best) < _smaller(stack, (a, b), sizer)):
-                    side = None
+                # 좌우 분할(자기 갈래에 남김)을 우선한다. 위아래로 나누는 건 위아래가 side_margin 배 이상 크고,
+                # 좌우로 나누면 글자가 기준 크기의 side_keep 배 밑으로 작아질 때뿐이다. 크기만으로 고르면
+                # 39px 대 35px 같은 작은 차이로 원문 자리를 버린다(04_02_1 합쳐진 구름: 오른쪽 갈래 글이 꼭대기
+                # 91px 띠로, 왼쪽 글이 가운데로 감). 비율만으로는 04_02_1(1.11, 좌우가 나음)과 08_06_1 왼쪽
+                # 구름(1.14, 좌우면 28px 로 작아져 위아래가 나음)을 못 가르고, 좌우 크기가 기준의 88% 대 70% 로 갈린다.
+                if side and sizer is not None and stack is not None:
+                    s_side = _smaller(side, (a, b), sizer.best)
+                    s_stack = _smaller(stack, (a, b), sizer)
+                    if s_stack >= side_margin * s_side and s_side < side_keep * sizer.base:
+                        side = None
                 if side:
                     a.target_box, b.target_box = side[id(a)], side[id(b)]
                     split_x.update((id(a), id(b)))

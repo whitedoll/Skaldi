@@ -300,38 +300,68 @@ def classify_styles(cfg: Config, client: OllamaClient, image: Image.Image, page:
             r.style = "gothic"
 
 
-def stroke_variation(gray: np.ndarray, box: list[int]) -> float | None:
+_SOLID_MARKS = re.compile("[♥❤♪♫]")
+
+
+def stroke_variation(gray: np.ndarray, box: list[int], text: str = "") -> float | None:
     """검은 획의 굵기가 얼마나 들쭉날쭉한가(표준편차/평균). 측정할 검은 획이 부족하면 None.
-    획 중심선은 거리 변환의 능선으로 잡는다(뼈대 추출 라이브러리 없이)."""
+    획 중심선은 거리 변환의 능선으로 잡는다(뼈대 추출 라이브러리 없이).
+
+    속이 꽉 찬 기호(♥ ♪)는 '아주 굵은 획'으로 잡혀 인쇄체도 손글씨처럼 들쭉날쭉하게 나온다
+    (07_05_1 'ふん♥ふんっ♥' 0.83). 원문(text)에 든 개수만큼 가장 굵은 덩어리를 빼고 잰다 — 굵은 덩어리를
+    일반 규칙으로 빼면 손글씨의 굵은 획까지 사라져 값이 0 근처로 무너진다."""
     x1, y1, x2, y2 = box
     c = gray[max(0, y1):y2, max(0, x1):x2]
     ink = (c < 110).astype(np.uint8)
     if ink.sum() < 30:
         return None
     dt = cv2.distanceTransform(ink, cv2.DIST_L2, 3)
-    ridge = (dt > 0) & (dt >= cv2.dilate(dt, np.ones((3, 3), np.uint8)))
+    keep = np.ones(ink.shape, bool)
+    solid = len(_SOLID_MARKS.findall(text))
+    if solid:
+        n, lab = cv2.connectedComponents(ink)
+        thick = np.zeros(n)
+        np.maximum.at(thick, lab.ravel(), dt.ravel())
+        thick[0] = -1                                  # 배경
+        keep = ~np.isin(lab, np.argsort(thick)[::-1][:solid])
+    ridge = (dt > 0) & (dt >= cv2.dilate(dt, np.ones((3, 3), np.uint8))) & keep
     w = dt[ridge] * 2
     w = w[w > 1]
     return float(np.std(w) / np.mean(w)) if len(w) >= 10 else None
 
 
-def pixel_style_check(gray: np.ndarray, page: Page, threshold: float = 0.37) -> None:
-    """말풍선 안 글자를 모델이 손글씨라고 했어도, 원문 획 굵기가 고르면 인쇄체로 되돌린다.
+def pixel_style_check(gray: np.ndarray, page: Page, threshold: float = 0.37, page_ratio: float = 1.2,
+                      ceiling: float = 0.40) -> None:
+    """말풍선 안 글자를 모델이 손글씨·명조라고 했어도, 원문 획 굵기가 고르면 인쇄체로 되돌린다.
 
     조판된 글꼴은 획 굵기가 일정하고 손으로 그린 글씨는 들쭉날쭉하다. 모델은 2~3글자 조각에서 이걸
     못 가린다 — 08쪽의 인쇄체 'ここ' 'へぇ〜' 를 손글씨로 판정했고, 같은 인쇄체 기준 조각을 나란히 보여 주고
     다시 물어도 답이 무작위였다(12b·26B 모두). 흰 바탕 말풍선의 검은 획으로 재면 인쇄체 0.25~0.35,
     손글씨 0.42~0.62 로 갈렸다(5쪽 19영역 전부 맞음). 그림 위 글자는 흰 외곽선과 배경 그림이 섞여
     값이 흔들리므로 말풍선 안만 본다. 옅은 색 글씨(분홍 손글씨 등)는 잴 수 없어 판정을 그대로 둔다.
+
+    기준은 고정값(threshold)과 '같은 페이지 인쇄체 말풍선 편차 중앙값 × page_ratio' 중 큰 것이다.
+    굵은 고딕을 쓰는 책은 인쇄체도 0.46 까지 나와서(Ankoman) 고정값만으로는 'ふん♥ふんっ♥' '．．．って！'
+    'おっ♪' 같은 짧은 인쇄체를 못 되돌렸다. 배율 1.3 이면 Sevengar 142쪽의 진짜 손글씨 'ぢぉん' 까지 되돌아가
+    1.2 로 둔다. 페이지 기준은 ceiling(0.40)을 넘지 않는다 — 인쇄체 편차가 높은 페이지(Tsusauto 109쪽 0.48)에서
+    보라색 손글씨 'ぴゅる' 까지 되돌아갔다. 손글씨는 0.42 부터다.
+
+    명조(mincho)는 한 페이지에 혼자만 명조이고 나머지 말풍선이 모두 인쇄체일 때만 같은 기준으로 되돌린다
+    (04_02_1 'そうでしたっけ…？記憶が曖昧…' 를 모델이 명조라 해 한 말풍선만 명조로 그려짐).
     인쇄체로 되돌릴 때는 같은 페이지 긴 대사들이 가장 많이 쓰는 계열을 따른다."""
     drawn = [r for r in page.regions if r.render]
     long_styles = [r.style for r in drawn if r.style != "hand" and len(_SFX_STRIP.sub("", r.text_ja)) > 3]
     typeset = max(set(long_styles), key=long_styles.count) if long_styles else "gothic"
-    for r in drawn:
-        if r.style != "hand" or r.kind != "bubble_text":
+    bubbles = [r for r in drawn if r.kind == "bubble_text"]
+    var = {id(r): stroke_variation(gray, r.box, r.text_ja) for r in bubbles}
+    base = [var[id(r)] for r in bubbles if r.style == typeset and var[id(r)] is not None]
+    limit = max(threshold, min(ceiling, float(np.median(base)) * page_ratio)) if len(base) >= 3 else threshold
+    minchos = [r for r in bubbles if r.style == "mincho"]
+    for r in bubbles:
+        lone_mincho = r.style == "mincho" and typeset != "mincho" and len(minchos) == 1 and len(base) >= 3
+        if r.style != "hand" and not lone_mincho:
             continue
-        v = stroke_variation(gray, r.box)
-        if v is not None and v < threshold:
+        v = var[id(r)]
+        if v is not None and v < limit:
+            r.notes = (r.notes + f" 글꼴:획 고름({v:.2f}<{limit:.2f}) {r.style}→인쇄체").strip()
             r.style = typeset
-            r.notes = (r.notes + f" 글꼴:획 고름({v:.2f})→인쇄체").strip()
-
