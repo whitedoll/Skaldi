@@ -77,7 +77,7 @@ render:
                                 # 거의 전부를 손글씨로 답하면 판정을 버리고 고딕으로 둔다.
                                 # 굵기(bold)는 이 값과 무관하게 항상 적용
   match_color: true             # 원문 획 색·외곽선 색을 따라감 (컬러 페이지)
-  bold_stroke_ratio: 0.16       # 획 두께/글자 크기 비율이 이 값 이상이면 굵은 글씨로 봄
+  bold_stroke_ratio: 0.19       # 획 폭(거리변환 능선 중앙값×2)/글자 크기 가 이 값 이상이면 굵은 글씨로 봄
   fake_bold_ratio: 0.025        # 굵은 자형이 없는 폰트(손글씨)의 획을 같은 색으로 덧대는 두께
   fake_bold_styles: [hand]      # 이 계열에서 weight=bold 일 때 획을 두껍게
   fonts:                        # 계열_굵기 → 폰트 파일 (없는 항목은 paths.font 로 대체)

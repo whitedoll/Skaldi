@@ -85,7 +85,7 @@ class RenderCfg(BaseModel):
     match_color: bool = True            # 원문 획·외곽선 색을 따라감
     fonts: dict[str, str] = Field(default_factory=dict)        # {gothic, gothic_bold, mincho, mincho_bold, hand, hand_bold}
     font_scale: dict[str, float] = Field(default_factory=dict) # 폰트별 크기 보정 (손글씨체는 작게 보여서 키움)
-    bold_stroke_ratio: float = 0.16     # 획 두께/글자 크기 가 이 값 이상이면 bold
+    bold_stroke_ratio: float = 0.19     # 획 두께/글자 크기 가 이 값 이상이면 bold
     fake_bold_ratio: float = 0.025      # 진짜 굵은 자형이 없는 폰트에서 획을 덧대는 두께 비율
     fake_bold_styles: list[str] = Field(default_factory=lambda: ["hand"])
     follow_angle: bool = True           # 원문이 기울어 있으면 번역문도 같은 각도로 돌려 그림

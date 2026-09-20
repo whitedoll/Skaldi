@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image
 
 from .config import Config
-from .order import pixel_style_check
+from .order import _SOLID_MARKS, pixel_style_check
 from .page import Page, Region
 from .skew import line_count, rotated_body, rotated_extent, text_angle
 from .textfit import fit_polygon, fit_text, fit_vertical, natural_width
@@ -242,14 +242,11 @@ def measure_text_style(img: np.ndarray, r: Region, bold_ratio: float) -> None:
     cand = (np.abs(lum - bg_lum) > 40).astype(np.uint8)
     # 가장자리에 닿은 길고 성긴 성분(테두리 선)은 제외
     n, labels, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
-    sizes = []
     for i in range(1, n):
         x, y, bw, bh, area = stats[i]
         touches = x == 0 or y == 0 or x + bw >= cw or y + bh >= ch
         if touches and (bw >= 0.85 * cw or bh >= 0.85 * ch) and area < 0.3 * bw * bh:
             cand[labels == i] = 0
-        elif area >= 12:
-            sizes.append(max(bw, bh))
     if cand.sum() < 20:
         return
     stroke = cv2.erode(cand, np.ones((3, 3), np.uint8))
@@ -269,15 +266,20 @@ def measure_text_style(img: np.ndarray, r: Region, bold_ratio: float) -> None:
         deliberate = snapped in ([255, 255, 255], [0, 0, 0]) or max(snapped) - min(snapped) > 40
         if deliberate and abs(_lum(ocol[None, None, :])[0, 0] - _lum(col[None, None, :])[0, 0]) > 80:
             r.outline_rgb = snapped
-    # 굵기: 획 폭(거리변환 상위값의 2배) / 글자 크기(성분 크기 중앙값)
-    if sizes:
-        dist = cv2.distanceTransform(stroke, cv2.DIST_L2, 3)
-        vals = dist[dist > 0]
-        if len(vals):
-            stroke_w = 2.0 * float(np.percentile(vals, 90))
-            char = float(np.median(sizes))
-            if char > 0:
-                r.weight = "bold" if stroke_w / char >= bold_ratio else "regular"
+    # 굵기: 획 폭 / 글자 크기(성분 크기 중앙값). 획 폭은 '거리변환 능선의 중앙값 × 2' 로 잰다.
+    # 예전처럼 거리변환 상위 10% 로 재면 ♥ 같은 속이 찬 모양이나 획이 뭉친 곳 하나에 값이 크게 뛴다
+    # (06_04_1 한 페이지에서 5.7 ~ 27.2px 로 흔들려 같은 글꼴인데 굵게/보통이 섞였다). 능선 중앙값은
+    # 같은 페이지에서 3.8px 로 일정하다.
+    dist = cv2.distanceTransform(stroke, cv2.DIST_L2, 3)
+    ridge = (dist > 0) & (dist >= cv2.dilate(dist, np.ones((3, 3), np.uint8)))
+    n2, _, st2, _ = cv2.connectedComponentsWithStats(stroke, connectivity=8)
+    sizes = [max(st2[i][2], st2[i][3]) for i in range(1, n2) if st2[i][4] >= 12]
+    vals = dist[ridge]
+    if sizes and len(vals):
+        char = float(np.median(sizes))
+        if char > 0:
+            r.weight_ratio = round(2.0 * float(np.median(vals)) / char, 3)
+            r.weight = "bold" if r.weight_ratio >= bold_ratio else "regular"
 
 
 def _snap_color(col: np.ndarray) -> list[int]:
@@ -519,7 +521,7 @@ class Eraser:
 
         for r in page.regions:
             r.body_box, r.target_box, r.widened = None, None, False
-            r.text_rgb, r.outline_rgb, r.weight = None, None, "regular"
+            r.text_rgb, r.outline_rgb, r.weight, r.weight_ratio = None, None, "regular", None
             if not r.render or r.erase == "none":
                 continue
             if self.cfg.render.match_color or self.cfg.render.match_style:
@@ -534,6 +536,8 @@ class Eraser:
                 x1, y1, x2, y2 = _clip(r.box, w, h, e.lama_dilate)
                 lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2],
                                                      _art_text_mask(orig_gray, r.box, e.lama_dilate, (x1, y1, x2, y2)))
+
+        page_weight_check(page, self.cfg.render.bold_stroke_ratio)
 
         if lama_mask.any() and e.lama:
             try:
@@ -1227,3 +1231,24 @@ def assign_polygons(page: Page, cfg: Config, gray: np.ndarray) -> None:
             if rc.overlap_layout == "poly" or poly_min > rect_min:
                 for r in cands:
                     r.poly = _mask_to_poly(masks[id(r)])
+
+
+def page_weight_check(page: Page, threshold: float, keep_high: float = 1.5, keep_low: float = 0.6) -> None:
+    """한 페이지 말풍선 대사의 굵기를 페이지 중앙값으로 통일한다.
+
+    한 페이지의 조판 대사는 대개 같은 글꼴·굵기인데, 측정값이 기준선 근처면 영역마다 0.14 / 0.16 처럼
+    갈려 가는 글꼴과 굵은 글꼴이 한 페이지에 섞인다(09_07, 06_04_1). 페이지 중앙값으로 한쪽을 정하고,
+    중앙값에서 크게 벗어난 영역(keep_high 배 이상 굵거나 keep_low 배 이하로 가는 것)만 자기 측정값을
+    따른다 — 정말로 굵게 외치는 말풍선은 그대로 남는다."""
+    rs = [r for r in page.regions
+          if r.kind == "bubble_text" and r.render and r.category == "dialogue" and r.weight_ratio is not None]
+    if len(rs) < 3:
+        return
+    mid = float(np.median([r.weight_ratio for r in rs]))
+    side = "bold" if mid >= threshold else "regular"
+    for r in rs:
+        v = r.weight_ratio or 0.0
+        if r.weight == side or v >= keep_high * mid or v <= keep_low * mid:
+            continue
+        r.weight = side
+        r.notes = (r.notes + f" 굵기:페이지 중앙값({v:.2f}/{mid:.2f})→{side}").strip()

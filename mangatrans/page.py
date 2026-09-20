@@ -29,6 +29,7 @@ class Region(BaseModel):
     vertical: bool = False                    # 세로쓰기로 그렸는지
     style: str = "gothic"                     # 글꼴 계열: gothic(고딕/인쇄체) | mincho(명조) | hand(손글씨)
     weight: str = "regular"                   # regular | bold (획 두께로 측정)
+    weight_ratio: float | None = None         # 획 폭 / 글자 크기 (굵기 판정값)
     text_rgb: list[int] | None = None         # 원문 획 색 (측정값). None 이면 text_color 규칙
     outline_rgb: list[int] | None = None      # 원문 외곽선 색 (있을 때)
     needs_review: bool = False                # 원문이 불명확하거나 번역 모델이 뜻을 못 잡음 → 원본 유지
