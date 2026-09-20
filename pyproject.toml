@@ -27,9 +27,14 @@ skaldi = "skaldi.cli:main"
 [project.optional-dependencies]
 gemini = ["google-genai>=1.0"]
 anytext = ["diffusers>=0.37", "scikit-image>=0.24"]
+
+# GUI 는 dependency-group 으로 두고 아래 default-groups 로 기본 설치한다
+[dependency-groups]
 gui = ["gradio>=5"]
 
 [tool.uv]
+# gui 그룹을 기본 포함 (uv sync 만 해도 gradio 설치됨, 빼려면 --no-group gui)
+default-groups = ["gui"]
 override-dependencies = [
     "numpy>=2",
     "pillow>=11",

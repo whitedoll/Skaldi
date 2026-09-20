@@ -1300,6 +1300,8 @@ anytext = [
 gemini = [
     { name = "google-genai" },
 ]
+
+[package.dev-dependencies]
 gui = [
     { name = "gradio" },
 ]
@@ -1309,7 +1311,6 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.0" },
     { name = "diffusers", marker = "extra == 'anytext'", specifier = ">=0.37" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0" },
-    { name = "gradio", marker = "extra == 'gui'", specifier = ">=5" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", specifier = ">=0.30" },
     { name = "numpy", specifier = ">=2" },
@@ -1326,7 +1327,10 @@ requires-dist = [
     { name = "torchvision", specifier = ">=0.23", index = "https://download.pytorch.org/whl/cu128" },
     { name = "transformers", specifier = ">=4.50" },
 ]
-provides-extras = ["gemini", "anytext", "gui"]
+provides-extras = ["gemini", "anytext"]
+
+[package.metadata.requires-dev]
+gui = [{ name = "gradio", specifier = ">=5" }]
 
 [[package]]
 name = "sniffio"
