@@ -10,3 +10,9 @@ input/
 # 원고 데이터 (만화 페이지·압축본) — 저장소에 넣지 않는다
 samples/
 test/
+
+# 개인 설정·작업 메모 (저장소에 넣지 않는다)
+.claude/
+CLAUDE.md
+STYLE_MATCH_kamaboko.md
+config_kamaboko.yaml
