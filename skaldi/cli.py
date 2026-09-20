@@ -1,15 +1,15 @@
-"""만화 번역 CLI.
+"""Skaldi — 만화 번역 CLI.
 
 사용 예)
-  python translate.py samples                       # 기본 렌더러(config: render.default)
-  python translate.py samples --render both         # pillow + anytext + qwen + 비교 이미지
-  python translate.py samples --rerender            # JSON만 읽어 다시 그림
-  python translate.py samples --force               # JSON이 있어도 다시 분석
-  python translate.py samples --files 08.webp       # 특정 파일만
-  python translate.py "samples/book.zip"            # zip/cbz → output/book.zip (같은 항목 이름)
-  python translate.py a.zip b.zip samples           # 여러 개를 한 번에 (모델은 한 번만 로드)
-  python translate.py samples --out-root D:/결과    # 저장 폴더 지정 → D:/결과/samples_ko/
-  python translate.py samples --out D:/결과/여기    # 그 폴더에 바로 (이름 접미사 없음)
+  uv run skaldi samples                       # 기본 렌더러(config: render.default)
+  uv run skaldi samples --render both         # pillow + anytext + qwen + 비교 이미지
+  uv run skaldi samples --rerender            # JSON만 읽어 다시 그림
+  uv run skaldi samples --force               # JSON이 있어도 다시 분석
+  uv run skaldi samples --files 08.webp       # 특정 파일만
+  uv run skaldi "samples/book.zip"            # zip/cbz → output/book.zip (같은 항목 이름)
+  uv run skaldi a.zip b.zip samples           # 여러 개를 한 번에 (모델은 한 번만 로드)
+  uv run skaldi samples --out-root D:/결과    # 저장 폴더 지정 → D:/결과/samples_ko/
+  uv run skaldi samples --out D:/결과/여기    # 그 폴더에 바로 (이름 접미사 없음)
 """
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from mangatrans.config import load_config
-from mangatrans.export import export_result
-from mangatrans.pipeline import Pipeline
-from mangatrans.progress import emit
-from mangatrans.render import resolve_names
+from .config import load_config
+from .export import export_result
+from .pipeline import Pipeline
+from .progress import emit
+from .render import resolve_names
 
 ARCHIVE_EXTS = (".zip", ".cbz")
 
@@ -51,7 +51,7 @@ def _export_only(args, cfg, renderers) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="일본어 만화 페이지를 한국어로 식자한다.")
+    ap = argparse.ArgumentParser(prog="skaldi", description="Skaldi — 일본어 만화 페이지를 한국어로 식자한다.")
     ap.add_argument("inputs", type=Path, nargs="+", help="페이지 이미지 폴더 또는 zip/cbz 파일 (여러 개 가능)")
     ap.add_argument("--out", type=Path, default=None,
                     help="결과를 이 폴더에 바로 넣는다 (이름 접미사를 붙이지 않음). 입력이 하나일 때만")

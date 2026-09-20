@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from mangatrans.config import load_config  # noqa: E402
+from skaldi.config import load_config  # noqa: E402
 
 COMFY_GIT = "https://github.com/comfyanonymous/ComfyUI"
 GGUF_NODE_GIT = "https://github.com/city96/ComfyUI-GGUF"

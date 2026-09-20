@@ -9,11 +9,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image  # noqa: E402
 
-from mangatrans.config import load_config  # noqa: E402
-from mangatrans.detect import Detector, attach_bubbles  # noqa: E402
-from mangatrans.ocr import crop_region, make_ocr  # noqa: E402
-from mangatrans.order import annotated_page  # noqa: E402
-from mangatrans.page import Region  # noqa: E402
+from skaldi.config import load_config  # noqa: E402
+from skaldi.detect import Detector, attach_bubbles  # noqa: E402
+from skaldi.ocr import crop_region, make_ocr  # noqa: E402
+from skaldi.order import annotated_page  # noqa: E402
+from skaldi.page import Region  # noqa: E402
 
 cfg = load_config()
 out = Path("output/smoke")

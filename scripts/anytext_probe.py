@@ -4,8 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np, torch
 from PIL import Image
-from mangatrans.config import load_config
-from mangatrans.render.anytext_renderer import AnyTextRenderer
+from skaldi.config import load_config
+from skaldi.render.anytext_renderer import AnyTextRenderer
 cfg = load_config()
 r = AnyTextRenderer(cfg)
 pipe = r._load()

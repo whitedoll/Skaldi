@@ -1,6 +1,8 @@
-# manga-transimage
+# Skaldi
 
 일본어 만화 페이지 이미지를 한국어로 완전 식자한 이미지로 바꾸는 개인용 CLI 도구.
+
+이름은 고대 노르드어 *skáld*(이야기를 자기 언어로 읊는 시인)에서 왔다.
 
 ## 파이프라인
 
@@ -23,18 +25,21 @@ Qwen 렌더러는 `scripts/install_comfyui.py`로 ComfyUI를 설치한 뒤 사�
 
 ## 사용
 
+`uv sync` 로 설치하면 `skaldi` 명령이 생긴다. 설치 없이 쓰려면 `uv run python -m skaldi ...` 로도 같다.
+
 ```bash
-uv run python translate.py samples                   # 기본 렌더러
-uv run python translate.py samples --render both     # 세 렌더러 + output/compare/
-uv run python translate.py samples --rerender        # JSON만 읽어 다시 그림 (모델 실행 없음)
-uv run python translate.py samples --force           # JSON이 있어도 다시 분석
-uv run python translate.py samples --files 08.webp   # 특정 파일만
-uv run python translate.py "book.zip"                # zip/cbz → output/book_ko.zip (--export 로 렌더러 선택)
-uv run python translate.py samples --out-root D:/결과 # 저장 폴더 지정 → D:/결과/samples_ko/
-uv run python translate.py samples --out D:/결과/여기 # 그 폴더에 바로 (이름 접미사 없음, 입력 1개 전용)
-uv run python translate.py samples --zip              # 폴더 입력도 결과를 zip 으로 (zip 입력은 원래부터 zip)
-uv run python translate.py "output/book_ko" --export-only --zip   # 이미 처리된 것에서 결과만 다시 뽑기
-uv run python translate.py a.zip b.zip samples        # 여러 개를 한 번에 (모델은 한 번만 로드)
+uv run skaldi samples                   # 기본 렌더러
+uv run skaldi samples --render both     # 세 렌더러 + output/compare/
+uv run skaldi samples --rerender        # JSON만 읽어 다시 그림 (모델 실행 없음)
+uv run skaldi samples --force           # JSON이 있어도 다시 분석
+uv run skaldi samples --files 08.webp   # 특정 파일만
+uv run skaldi samples --debug           # <작업폴더>/debug/ 에 상자·글자 자리를 겹쳐 그린 그림
+uv run skaldi "book.zip"                # zip/cbz → output/book_ko.zip (--export 로 렌더러 선택)
+uv run skaldi samples --out-root D:/결과 # 저장 폴더 지정 → D:/결과/samples_ko/
+uv run skaldi samples --out D:/결과/여기 # 그 폴더에 바로 (이름 접미사 없음, 입력 1개 전용)
+uv run skaldi samples --zip              # 폴더 입력도 결과를 zip 으로 (zip 입력은 원래부터 zip)
+uv run skaldi "output/book_ko" --export-only --zip   # 이미 처리된 것에서 결과만 다시 뽑기
+uv run skaldi a.zip b.zip samples        # 여러 개를 한 번에 (모델은 한 번만 로드)
 uv run python bench_models.py samples                # 로컬 모델 비교 → output/bench/report.md
 uv run python gui.py                                 # GUI (실행 탭 + 검수 탭), http://127.0.0.1:7860
 ```
@@ -64,7 +69,7 @@ uv run python gui.py                                 # GUI (실행 탭 + 검수 
 - **현재 작업**: 작업 이름 · 몇 장 중 몇 장째 · 퍼센트 · 지금 도는 단계(탐지 / OCR / 순서·분류 / 번역 / 지우기 / 렌더링 / 압축 풀기 / zip 만들기) · 한 장이라도 끝나면 **장당 평균 시간**과 이 작업의 남은 시간
 - 막대 아래에 **처리 중: `<파일명>`** 이 따로 표시된다
 
-진행도는 자식 프로세스가 `MANGATRANS_PROGRESS=1` 일 때만 stdout 에 찍는 `@@PROG {json}` 한 줄(`mangatrans/progress.py`)로 전달된다. GUI 는 이 줄을 로그에서 걸러 내고 막대에만 쓴다. CLI 로 직접 돌릴 때는 환경변수가 없으니 아무것도 찍히지 않는다.
+진행도는 자식 프로세스가 `SKALDI_PROGRESS=1` 일 때만 stdout 에 찍는 `@@PROG {json}` 한 줄(`skaldi/progress.py`)로 전달된다. GUI 는 이 줄을 로그에서 걸러 내고 막대에만 쓴다. CLI 로 직접 돌릴 때는 환경변수가 없으니 아무것도 찍히지 않는다.
 
 **검수 탭**: 페이지를 고르면 원본·결과를 나란히 보여주고, 표에서 `text_ko`·`category`·`render`·`style`·`weight`를 고친 뒤 "저장 후 다시 그리기"를 누르면 JSON을 저장하고 그 페이지만 다시 그린다.
 
@@ -85,7 +90,7 @@ uv run python gui.py                                 # GUI (실행 탭 + 검수 
 
 ## 출력
 
-결과만 따로 빼내려면 GUI 의 내보내기 탭이나 `--export-only` 를 쓴다(`mangatrans/export.py`). 입력마다 전용 폴더가 생긴다. 이름은 `<입력 이름><접미사>` 이고 접미사는 `config.yaml` 의 `paths.output_suffix`(기본 `_ko`)로 바꾼다. zip 입력은 결과 zip도 같은 이름으로 나온다. 이미지가 아닌 항목은 그대로 복사된다.
+결과만 따로 빼내려면 GUI 의 내보내기 탭이나 `--export-only` 를 쓴다(`skaldi/export.py`). 입력마다 전용 폴더가 생긴다. 이름은 `<입력 이름><접미사>` 이고 접미사는 `config.yaml` 의 `paths.output_suffix`(기본 `_ko`)로 바꾼다. zip 입력은 결과 zip도 같은 이름으로 나온다. 이미지가 아닌 항목은 그대로 복사된다.
 
 ```
 output/
@@ -111,7 +116,7 @@ JSON 플래그: `overflow`(최소 크기의 절반까지 줄여도 넘침 → �
 - 외곽선 두께: 그림 위 글자는 `stroke_ratio`(0.12), 말풍선 안 글자는 `bubble_stroke_ratio`(0.05). 원문도 대개 얇은 흰 테두리를 두르고 있어 말풍선 안에도 넣는다. 0으로 두면 외곽선 없음
 - `erase.widen_bubbles`(기본 `false`): 켜면 좁은 말풍선을 넓힌다. 지금 상자에 기준 크기의 `widen_min_font_ratio` 이상으로 `widen_max_lines` 줄 안에 들어가면 손대지 않음. 그 밖의 말풍선만 가로로 확대하고 원본 테두리 두께로 다시 그림. 최대 확장은 `widen_max_ratio`. 넓힌 만큼 주변 그림이 가려진다. 확대는 마스크가 아니라 **윤곽선(점 목록)** 에 적용한다 — 마스크를 픽셀째 늘리면 계단이 남아 말풍선이 다각형처럼 각져 보이고, 흐림·이진화로 계단을 지우면 이번엔 가는 부분이 사라져 옛 윤곽선만 남아 테두리가 두 겹이 된다. 뿔이 뻗은 폭발형 말풍선은 아예 넓히지 않는다(늘이면 뿔이 뭉개져 원래 모양을 잃는다)
 - 효과음 예외: 같은 글자 반복(おおおお), 말풍선 밖 짧은 가타카나 소리(ゴキュッ)는 규칙으로 확정. 말풍선 안 글자는 비전 모델과 번역 모델이 둘 다 sfx라고 해야 효과음으로 보고 원본을 유지(JSON에 음역만 기록). 같은 말풍선에 확정 효과음이 있으면 함께 잡힌 짧은 조각도 효과음. 웃음·콧소리(クスクス, フフ)와 히라가나 감탄사(そう, へぇ〜)는 항상 대사로 번역
-- 줄바꿈: 띄어쓰기 단위 → 안 들어가면 조사·'하-' 용언 앞뒤(마마한테 | 배설 | 하는 거)에서 끊음 → 그래도 안 되면 최소 크기에서만 글자 단위. 목록은 `mangatrans/textfit.py`의 `_PARTICLES`, `_VERB_HEADS`
+- 줄바꿈: 띄어쓰기 단위 → 안 들어가면 조사·'하-' 용언 앞뒤(마마한테 | 배설 | 하는 거)에서 끊음 → 그래도 안 되면 최소 크기에서만 글자 단위. 목록은 `skaldi/textfit.py`의 `_PARTICLES`, `_VERB_HEADS`
 - 번역 모델이 뜻을 못 잡은 원문(`note: unclear`)은 `needs_review: true`로 표시하고 원본을 유지
 - 그림 위 글자(나레이션)는 LaMa로 지우고 흰 외곽선 글자로 그린다
 
@@ -119,7 +124,7 @@ JSON 플래그: `overflow`(최소 크기의 절반까지 줄여도 넘침 → �
 
 | 역할 | 선택 | 이유 |
 |---|---|---|
-| 번역 | gemma4 26B-A4B UD-Q2_K_XL (`hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL`) | MoE(토큰당 3.8B 활성)라 12GB 카드에서 21% 를 CPU 로 내려도 12b 만큼 빠르고, 12b 가 빠뜨리던 긴 대사를 잡는다. 따옴표·장음 표기가 흔들려 번역 뒤 정규화(mangatrans/normalize.py)를 거친다. 비교: output/bench_ab_gemma4/report_g26q2.md. 재시도: gemma4:12b → qwen3.5:9b → exaone3.5:7.8b |
+| 번역 | gemma4 26B-A4B UD-Q2_K_XL (`hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL`) | MoE(토큰당 3.8B 활성)라 12GB 카드에서 21% 를 CPU 로 내려도 12b 만큼 빠르고, 12b 가 빠뜨리던 긴 대사를 잡는다. 따옴표·장음 표기가 흔들려 번역 뒤 정규화(skaldi/normalize.py)를 거친다. 비교: output/bench_ab_gemma4/report_g26q2.md. 재시도: gemma4:12b → qwen3.5:9b → exaone3.5:7.8b |
 | 순서·분류 | gemma4 26B-A4B UD-Q2_K_XL | 번역과 같은 모델이라 쪽마다 모델 교체가 없다(실측 37.6초/쪽, 비전만 12b 로 두면 50초/쪽). 분류 번호 누락도 12b 보다 적었다 |
 | 탈락 | qwen2.5:14b, aya-expanse | 일본어 잔류·누락·환각 |
 

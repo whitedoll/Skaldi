@@ -4,7 +4,7 @@
   uv run python gui.py --port 7870
 
 탭 1 실행: 폴더·zip 을 여러 개 골라 파이프라인으로 처리
-           (translate.py 를 자식 프로세스로 한 번만 띄우고, 로그와 진행 막대를 실시간 표시)
+           (skaldi CLI 를 자식 프로세스로 한 번만 띄우고, 로그와 진행 막대를 실시간 표시)
 탭 2 검수: 페이지별 원본/결과 보기, 번역문·분류·그리기 여부를 표에서 고친 뒤 저장하고 다시 그리기
 """
 from __future__ import annotations
@@ -24,11 +24,11 @@ from pathlib import Path
 import gradio as gr
 from PIL import Image
 
-from mangatrans.config import ROOT, load_config
-from mangatrans.export import export_result, list_works, renderers_in
-from mangatrans.page import Page
-from mangatrans.pipeline import MANUAL_NOTE, Pipeline
-from mangatrans.progress import parse as parse_progress
+from skaldi.config import ROOT, load_config
+from skaldi.export import export_result, list_works, renderers_in
+from skaldi.page import Page
+from skaldi.pipeline import MANUAL_NOTE, Pipeline
+from skaldi.progress import parse as parse_progress
 
 CFG = load_config()
 DEFAULT_OUT = CFG.abs(CFG.paths.output)
@@ -341,7 +341,7 @@ def idle_html(msg: str = "실행을 누르면 여기에 진행 상황이 표시�
 # ---------------------------------------------------------------- 실행 탭
 def run_pipeline(paths_text: str, out_root: str, config_name: str, renderer: str, force: bool, rerender: bool,
                  debug: bool = False, as_zip: bool = False):
-    """translate.py 를 자식 프로세스로 실행하고 로그·진행도를 실시간으로 흘려보낸다.
+    """skaldi CLI 를 자식 프로세스로 실행하고 로그·진행도를 실시간으로 흘려보낸다.
 
     입력이 여러 개여도 프로세스는 하나만 띄운다 (모델을 한 번만 로드하기 위해)."""
     targets = split_paths(paths_text)
@@ -353,7 +353,7 @@ def run_pipeline(paths_text: str, out_root: str, config_name: str, renderer: str
         yield idle_html("경로가 없습니다: " + ", ".join(missing)), "경로가 없습니다:\n" + "\n".join(missing)
         return
 
-    cmd = [sys.executable, str(ROOT / "translate.py"), *targets, "--render", renderer]
+    cmd = [sys.executable, "-m", "skaldi", *targets, "--render", renderer]
     if config_name and config_name != "config.yaml":
         cmd += ["--config", str(ROOT / config_name)]
     out_root = out_root.strip().strip(chr(34))
@@ -368,7 +368,7 @@ def run_pipeline(paths_text: str, out_root: str, config_name: str, renderer: str
         cmd.append("--debug")
     if as_zip:
         cmd.append("--zip")             # 폴더 입력도 zip 으로 (zip/cbz 입력은 원래부터 zip 으로 나온다)
-    log = ("$ translate.py " + " ".join(f'"{t}"' for t in targets)
+    log = ("$ skaldi " + " ".join(f'"{t}"' for t in targets)
            + f" --render {renderer}"
            + (f" --config {config_name}" if config_name != "config.yaml" else "")
            + (f' --out-root "{out_root}"' if out_root else "")
@@ -379,7 +379,7 @@ def run_pipeline(paths_text: str, out_root: str, config_name: str, renderer: str
 
     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", bufsize=1,
-                            env={**os.environ, "PYTHONIOENCODING": "utf-8", "MANGATRANS_PROGRESS": "1",
+                            env={**os.environ, "PYTHONIOENCODING": "utf-8", "SKALDI_PROGRESS": "1",
                                  "HF_HUB_DISABLE_PROGRESS_BARS": "1", "HF_HUB_DISABLE_SYMLINKS_WARNING": "1"})
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -539,8 +539,8 @@ def save_and_render(rel: str, renderer: str, rows):
 
 
 def build() -> gr.Blocks:
-    with gr.Blocks(title="manga-transimage") as demo:
-        gr.Markdown("## manga-transimage — 일본어 만화 → 한국어 식자")
+    with gr.Blocks(title="Skaldi") as demo:
+        gr.Markdown("## Skaldi — 일본어 만화 → 한국어 식자")
         with gr.Tab("실행"):
             with gr.Row():
                 path = gr.Textbox(label="입력 목록 (한 줄에 하나: 폴더 또는 zip/cbz)", scale=6, lines=4, max_lines=12,

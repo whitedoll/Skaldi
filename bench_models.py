@@ -13,13 +13,13 @@ from pathlib import Path
 
 from PIL import Image
 
-from mangatrans.config import load_config
-from mangatrans.glossary import load_glossary
-from mangatrans.llm import OllamaClient, looks_refused
-from mangatrans.order import heuristic_order, order_and_classify
-from mangatrans.page import Page
-from mangatrans.pipeline import Pipeline, list_images
-from mangatrans.translate import translate_page
+from skaldi.config import load_config
+from skaldi.glossary import load_glossary
+from skaldi.llm import OllamaClient, looks_refused
+from skaldi.order import heuristic_order, order_and_classify
+from skaldi.page import Page
+from skaldi.pipeline import Pipeline, list_images
+from skaldi.translate import translate_page
 
 DEFAULT_TRANSLATE = ["qwen3.5:9b", "gemma4:12b", "exaone3.5:7.8b", "qwen2.5:14b", "aya-expanse:8b"]
 DEFAULT_VISION = ["qwen3.5:9b", "gemma4:12b"]
@@ -35,9 +35,9 @@ def prepare_pages(pipe: Pipeline, images: list[Path], cache: Path) -> dict[str, 
             continue
         image = Image.open(src).convert("RGB")
         page = Page(source=str(src), width=image.width, height=image.height)
-        from mangatrans.detect import attach_bubbles
-        from mangatrans.ocr import crop_region
-        from mangatrans.page import Region
+        from skaldi.detect import attach_bubbles
+        from skaldi.ocr import crop_region
+        from skaldi.page import Region
 
         regs = [Region(id=i, kind="bubble_text" if d.label == "text_bubble" else "free_text",
                        box=d.box, bubble_box=b, score=round(d.score, 3))

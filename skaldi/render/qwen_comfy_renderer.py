@@ -33,7 +33,7 @@ def build_graph(cfg: Config, image_name: str, prompt: str, seed: int) -> dict:
                "inputs": {"clip": ["2", 0], "prompt": "", "vae": ["3", 0], "image1": ["5", 0]}},
         "13": {"class_type": "VAEEncode", "inputs": {"pixels": ["5", 0], "vae": ["3", 0]}},
         "15": {"class_type": "VAEDecode", "inputs": {"samples": ["14", 0], "vae": ["3", 0]}},
-        "16": {"class_type": "SaveImage", "inputs": {"images": ["15", 0], "filename_prefix": "mangatrans_qwen"}},
+        "16": {"class_type": "SaveImage", "inputs": {"images": ["15", 0], "filename_prefix": "skaldi_qwen"}},
     }
     model_ref = ["7", 0]
     if lightning:
@@ -104,7 +104,7 @@ class QwenComfyRenderer:
             "Use a clean black printed manga font, horizontal lines, centered, sized to fit the bubble. "
             "Keep every other part of the image exactly the same."
         )
-        name = client.upload_image(crop, f"mangatrans_{page.source.split('/')[-1].split(chr(92))[-1]}_{r.id}.png")
+        name = client.upload_image(crop, f"skaldi_{page.source.split('/')[-1].split(chr(92))[-1]}_{r.id}.png")
         seed = random.randint(0, 2**31 - 1)
         out = client.run(build_graph(self.cfg, name, prompt, seed))[0]
         out = out.resize(canvas.size, Image.LANCZOS)

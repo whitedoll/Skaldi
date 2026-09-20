@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from mangatrans.config import load_config  # noqa: E402
+from skaldi.config import load_config  # noqa: E402
 
 ANYTEXT_CODE_BASE = "https://raw.githubusercontent.com/huggingface/diffusers/main/examples/research_projects/anytext"
 ANYTEXT_CODE_FILES = ["README.md", "anytext.py", "anytext_controlnet.py"]
