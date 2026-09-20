@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from .config import Config
+from .debug import debug_image
 from .detect import Detector, attach_bubbles
 from .erase import Eraser
 from .export import export_result
@@ -64,8 +65,9 @@ def save_image(img: Image.Image, path: Path, quality: int) -> None:
 class Pipeline:
     """무거운 모델은 처음 필요할 때 한 번만 로드한다."""
 
-    def __init__(self, cfg: Config, out_dir: Path | None = None):
+    def __init__(self, cfg: Config, out_dir: Path | None = None, debug: bool = False):
         self.cfg = cfg
+        self.debug = debug          # True 면 <작업폴더>/debug/ 에 상자를 겹쳐 그린 그림을 남긴다
         self.out = out_dir or cfg.abs(cfg.paths.output)
         self.base_out = self.out          # named_dir 의 기준. self.out 은 입력마다 바뀐다.
         self._detector = None
@@ -216,6 +218,10 @@ class Pipeline:
             save_image(out, path, self.cfg.render.jpeg_quality)
             results[name] = path
             outputs.append((name, out))
+            if self.debug:
+                dpath = self.out / "debug" / f"{src.stem}{'' if name == self.cfg.render.default else '_' + name}.jpg"
+                save_image(debug_image(out, page, self.cfg.abs(self.cfg.paths.font)), dpath, 88)
+                results[f"debug({name})"] = dpath
         if len(outputs) > 2 and self.cfg.render.compare:
             sheet = compare_sheet(outputs, str(self.cfg.abs(self.cfg.paths.font)))
             spath = self.out / "compare" / f"{src.stem}.jpg"

@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--export", default=None, help="내보낼 렌더러 (기본: 첫 번째 렌더러)")
     ap.add_argument("--zip", action="store_true",
                     help="폴더 입력도 결과를 zip 으로 내보낸다 (zip 입력은 원래부터 zip 으로 나온다)")
+    ap.add_argument("--debug", action="store_true",
+                    help="<작업폴더>/debug/ 에 글자 상자·말풍선 상자·글자 자리를 겹쳐 그린 그림을 남긴다")
     ap.add_argument("--export-only", action="store_true",
                     help="모델을 돌리지 않고, 이미 처리된 작업 폴더에서 결과만 내보낸다")
     args = ap.parse_args(argv)
@@ -90,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.export_only:
         return _export_only(args, cfg, renderers)
     # 입력이 여러 개여도 파이프라인(=모델)은 하나만 만들어 재사용한다.
-    pipe = Pipeline(cfg, out_dir=args.out)
+    pipe = Pipeline(cfg, out_dir=args.out, debug=args.debug)
     total = len(args.inputs)
     emit("plan", total=total, renderers=renderers)
     failed = 0
