@@ -1,6 +1,8 @@
 """글자 크기·줄바꿈 맞춤. 렌더러와 지우기(말풍선 넓히기) 양쪽에서 쓴다."""
 from __future__ import annotations
 
+import math
+import re
 from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
@@ -157,6 +159,27 @@ def _fits(lines: list[str], font_path: str, size: int, box_w: int, box_h: int,
           spacing: float, fallback: str | None) -> bool:
     return int(size * spacing) * len(lines) <= box_h and all(
         text_width(l, font_path, size, fallback) <= box_w for l in lines)
+
+
+# 원문 글자 수와 상자 넓이에서 글자 크기를 되짚을 때 쓰는 계수. CJK 글자는 정사각형에 가까워
+# 한 글자가 대략 (글자크기)^2 만큼을 차지하므로 sqrt(상자넓이/글자수) 가 글자 크기에 비례한다.
+# 자간·행간과 상자 여백 때문에 그대로는 크게 나와 0.79 를 곱한다. 기존 작품 8종의 JSON 으로 맞춘
+# 값이다 — 글자 크기가 천장에 걸리지 않았던 작품(Sevengar·brake2·samples)에서 실제로 쓰인
+# 크기와 3% 안쪽으로 일치한다.
+SRC_FONT_K = 0.79
+SRC_FONT_MIN_CHARS = 4      # 이보다 짧은 글('응!')은 상자를 채우지 않아 추정이 튄다
+
+
+def source_font_size(text_ja: str, box_w: int, box_h: int, k: float = SRC_FONT_K) -> int | None:
+    """원문 글자 상자와 원문 글자 수로 원문 글자 크기를 추정한다. 못 재면 None.
+
+    페이지 높이에 비례한 기준 크기는 판형이 바뀌면 무너진다(1920x1080 가로형에서 19px 이 되어
+    원문의 절반도 안 된다). 원문 글자 크기를 직접 되짚으면 판형과 무관하게 맞는다."""
+    n = len(re.sub(r"\s", "", text_ja))
+    if n < SRC_FONT_MIN_CHARS or box_w < 8 or box_h < 8:
+        return None
+    size = k * math.sqrt(box_w * box_h / n)
+    return max(6, min(int(size), min(box_w, box_h)))    # 한 글자가 상자 짧은 변보다 클 수는 없다
 
 
 def fit_text(text: str, font_path: str, box_w: int, box_h: int, base: int, minimum: int,

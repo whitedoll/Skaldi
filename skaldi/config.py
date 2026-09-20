@@ -81,6 +81,8 @@ class RenderCfg(BaseModel):
     group_floor: float = 0.85           # 한 구름 묶음의 글자 크기를 맞출 때 기준 크기의 이 배 밑으로는 내리지 않음
     overlap_vertical: str = "short"     # 좌우로 붙은 말풍선을 나눠 좁고 길어진 자리: short(한 열에 드는 짧은 웃음·외침만 세로)
                                         # | all(여러 열 세로쓰기도 더 크게 들어가면) | off(항상 가로)
+    match_size: bool = True             # 원문 글자 크기를 재서 기준 크기로 쓴다. 끄면 페이지 높이 비례
+    src_font_scale: float = 0.79        # 원문 글자 크기 추정 계수. 올리면 전체적으로 크게 그린다
     match_style: bool = True            # 글꼴 계열 판정 (굵기는 이 값과 무관하게 항상 적용)
     match_color: bool = True            # 원문 획·외곽선 색을 따라감
     fonts: dict[str, str] = Field(default_factory=dict)        # {gothic, gothic_bold, mincho, mincho_bold, hand, hand_bold}

@@ -25,6 +25,7 @@ class Region(BaseModel):
     render: bool = True                       # 이미지에 그릴지
     erase: EraseMode = "white"
     font_size: int | None = None              # 렌더러가 실제 사용한 크기
+    src_font_size: int | None = None          # 원문 글자 크기 추정값 (기준 크기로 쓴다)
     text_color: str = "black"                 # 말풍선 배경이 어두우면 white (지우기 단계에서 결정)
     vertical: bool = False                    # 세로쓰기로 그렸는지
     style: str = "gothic"                     # 글꼴 계열: gothic(고딕/인쇄체) | mincho(명조) | hand(손글씨)
