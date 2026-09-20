@@ -96,6 +96,18 @@ class RenderCfg(BaseModel):
     supersample_below: int = 35         # 이 크기(px) 미만 글자는 크게 그려 줄여서 계단 현상을 줄임
 
 
+class FrontMatterCfg(BaseModel):
+    """표지·속표지 같은 앞장을 번역에서 뺀다. 판정 근거는 frontmatter.py 참고."""
+    skip: bool = True
+    analyze: bool = True            # 앞장도 OCR·번역해서 JSON 에는 남긴다 (그리지는 않는다).
+                                    # 표지 제목을 사람이 직접 식자할 때 쓴다. false 면 장당 약 40초 절약
+    max_pages: int = 4              # 앞에서 이만큼까지만 검사한다 (그 뒤는 무조건 본문)
+    max_bubble_text: int = 1        # 말풍선 안 글자가 이 개수 이하일 때만 앞장 후보
+    logo_area: float = 0.05         # 페이지 면적 대비 이 이상인 '말풍선 밖 글자' = 제목 로고
+    sat_margin: float = 0.05        # 본문 채도 중앙값보다 이만큼 높으면 컬러 페이지
+    ratio_margin: float = 0.08      # 종횡비가 본문과 이만큼 다르면 판형이 다른 장
+
+
 class AnyTextCfg(BaseModel):
     repo: str = "tolgacangoz/anytext"
     controlnet_repo: str = "tolgacangoz/anytext-controlnet"
@@ -127,6 +139,7 @@ class Config(BaseModel):
     translate: TranslateCfg = TranslateCfg()
     erase: EraseCfg = EraseCfg()
     render: RenderCfg = RenderCfg()
+    frontmatter: FrontMatterCfg = FrontMatterCfg()
     anytext: AnyTextCfg = AnyTextCfg()
     qwen: QwenCfg = QwenCfg()
 

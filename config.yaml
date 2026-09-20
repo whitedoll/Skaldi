@@ -43,6 +43,16 @@ translate:
   source_lang: 일본어
   target_lang: 한국어
 
+frontmatter:                    # 표지·속표지 같은 앞장은 번역하지 않고 원본을 둔다
+  skip: true
+  analyze: true                 # 앞장도 OCR·번역해 JSON 에 남긴다(그리지는 않음). 표지 제목을
+                                # 직접 식자할 때 쓴다. false 면 분석 자체를 생략해 장당 약 40초 빠르다
+  max_pages: 4                  # 앞에서 이만큼까지만 검사 (그 뒤는 무조건 본문)
+  max_bubble_text: 1            # 말풍선 안 글자가 이 개수 이하일 때만 앞장 후보
+  logo_area: 0.05               # 페이지 면적 대비 이 이상인 '말풍선 밖 글자' = 제목 로고
+  sat_margin: 0.05              # 본문 채도 중앙값보다 이만큼 높으면 컬러 페이지
+  ratio_margin: 0.08            # 종횡비가 본문과 이만큼 다르면 판형이 다른 장
+
 erase:
   bubble_padding: 6             # 글자 획 탐색 크롭 여백(px)
   flood_fill: true              # (넓히기에서) 말풍선 내부를 flood fill로 찾음

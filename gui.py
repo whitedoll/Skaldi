@@ -340,7 +340,7 @@ def idle_html(msg: str = "실행을 누르면 여기에 진행 상황이 표시�
 
 # ---------------------------------------------------------------- 실행 탭
 def run_pipeline(paths_text: str, out_root: str, config_name: str, renderer: str, force: bool, rerender: bool,
-                 debug: bool = False, as_zip: bool = False):
+                 debug: bool = False, as_zip: bool = False, skip_front: bool = True):
     """skaldi CLI 를 자식 프로세스로 실행하고 로그·진행도를 실시간으로 흘려보낸다.
 
     입력이 여러 개여도 프로세스는 하나만 띄운다 (모델을 한 번만 로드하기 위해)."""
@@ -368,11 +368,14 @@ def run_pipeline(paths_text: str, out_root: str, config_name: str, renderer: str
         cmd.append("--debug")
     if as_zip:
         cmd.append("--zip")             # 폴더 입력도 zip 으로 (zip/cbz 입력은 원래부터 zip 으로 나온다)
+    if not skip_front:
+        cmd.append("--no-skip-front")
     log = ("$ skaldi " + " ".join(f'"{t}"' for t in targets)
            + f" --render {renderer}"
            + (f" --config {config_name}" if config_name != "config.yaml" else "")
            + (f' --out-root "{out_root}"' if out_root else "")
-           + (" --debug" if debug else "") + (" --zip" if as_zip else "") + "\n")
+           + (" --debug" if debug else "") + (" --zip" if as_zip else "")
+           + ("" if skip_front else " --no-skip-front") + "\n")
     st: dict = {"t0": time.time(), "jobs_total": len(targets), "job_index": 0,
                 "job_name": Path(targets[0]).name, "stage": "모델 로드 중..."}
     yield progress_html(st), log
@@ -569,6 +572,8 @@ def build() -> gr.Blocks:
                                        info="<작업폴더>/debug/ 에 글자 상자·말풍선 상자·글자 자리를 겹쳐 그린다")
                 zip_cb = gr.Checkbox(label="결과를 zip 으로", value=True,
                                      info="zip/cbz 입력은 원래부터 zip 으로 나온다. 폴더 입력도 zip 으로 만든다")
+                front_cb = gr.Checkbox(label="표지·속표지 건너뛰기", value=True,
+                                       info="앞장은 번역하지 않고 원본을 그대로 둔다. 끄면 앞장도 번역한다")
             run_btn = gr.Button("실행", variant="primary")
             prog = gr.HTML(idle_html(), label="진행도")
             log = gr.Textbox(label="로그", lines=20, max_lines=40)
@@ -579,7 +584,8 @@ def build() -> gr.Blocks:
             clear_btn.click(lambda: "", None, path, queue=False)
             up.upload(accept_upload, [up, path], path)
             out_btn.click(lambda cur: pick_out(cur), out_box, out_box, queue=False)
-            run_btn.click(run_pipeline, [path, out_box, cfg_dd, renderer, force, rerender, debug_cb, zip_cb],
+            run_btn.click(run_pipeline,
+                          [path, out_box, cfg_dd, renderer, force, rerender, debug_cb, zip_cb, front_cb],
                           [prog, log])
 
         with gr.Tab("내보내기"):

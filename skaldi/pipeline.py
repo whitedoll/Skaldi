@@ -16,6 +16,7 @@ from .debug import debug_image
 from .detect import Detector, attach_bubbles
 from .erase import Eraser
 from .export import export_result
+from .frontmatter import find as find_frontmatter
 from .glossary import glossary_paths, load_glossary
 from .llm import make_client
 from .ocr import cross_check, crop_region, make_ocr
@@ -124,6 +125,19 @@ class Pipeline:
             if hasattr(r, "close"):
                 r.close()
         self._renderers.clear()           # 닫은 렌더러를 다음 입력에서 재사용하지 않도록
+
+    # ---- 앞장(표지) ----------------------------------------------------
+    def find_front(self, images: list[Path]) -> dict[Path, str]:
+        """번역하지 않고 원본을 둘 앞장 → 그렇게 본 근거."""
+        if not self.cfg.frontmatter.skip or not images:
+            return {}
+
+        def detect(im):
+            dets = self.detector.detect(im)
+            return [d.label for d in dets], [d.box for d in dets]
+
+        first_is_cover = self._cover is not None and images[0] == self._cover
+        return find_frontmatter(images, detect, self.cfg.frontmatter, first_is_cover)
 
     # ---- stages -------------------------------------------------------
     def analyze(self, src: Path, glossary: dict) -> Page:
@@ -282,20 +296,46 @@ class Pipeline:
         if len(paths) > 1:
             console.print("  용어집: " + ", ".join(str(p) for p in paths), markup=False, style="dim")
         emit("pages", total=len(images), out=str(self.out))
+        front = self.find_front(images)
+        if front:
+            console.print(f"  앞장 {len(front)}장은 번역하지 않고 원본을 둡니다", style="dim")
         console.print(f"[bold]{len(images)}장 처리, 렌더러: {', '.join(renderers)}[/bold]")
         t0 = time.time()
         try:
-            self._run_pages(images, glossary, renderers, rerender, force)
+            self._run_pages(images, glossary, renderers, rerender, force, front)
         finally:
             self.close()
         console.print(f"[dim]처리 시간 {time.time() - t0:.1f}s ({len(images)}장, 장당 {(time.time() - t0) / max(1, len(images)):.1f}s)[/dim]")
 
-    def _run_pages(self, images, glossary, renderers, rerender, force) -> None:
+    def _run_pages(self, images, glossary, renderers, rerender, force, front=None) -> None:
         total = len(images)
+        front = front or {}
         for i, src in enumerate(images):
             emit("page", index=i, total=total, name=src.name)
             jpath = self.json_path(src)
             console.print(f"[cyan]{escape(src.name)}[/cyan]")
+            if src in front:
+                console.print(f"  앞장 — 그리지 않고 원본을 둠 ({front[src]})", style="dim")
+                # 그리지는 않아도 제목 원문·번역문은 JSON 에 남긴다. 표지 식자는 사람이 직접
+                # 하게 되는데(글자를 지울 수 없다) 그때 번역문이 있어야 쓸모가 있다.
+                if self.cfg.frontmatter.analyze and not rerender:
+                    if jpath.exists() and not force:
+                        console.print("  JSON 있음, 분석 건너뜀", style="dim")
+                    else:
+                        page = self.analyze(src, glossary)
+                        page.save(jpath)
+                        console.print(f"  → json: {jpath}", markup=False)
+                        for w in page.warnings:
+                            console.print(f"  [yellow]! {w}[/yellow]")
+                else:
+                    emit("stage", name="앞장")
+                # 폴더 입력은 내보내기가 렌더 폴더만 훑으므로(export._pairs) 원본을 거기
+                # 복사해 두어야 결과에서 빠지지 않는다.
+                for name in renderers:
+                    dest = self.render_path(src, name)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+                continue
             if rerender:
                 if not jpath.exists():
                     console.print("  [yellow]JSON이 없어 건너뜀[/yellow]")
