@@ -16,7 +16,7 @@ from .debug import debug_image
 from .detect import Detector, attach_bubbles
 from .erase import Eraser
 from .export import export_result
-from .glossary import load_glossary
+from .glossary import glossary_paths, load_glossary
 from .llm import make_client
 from .ocr import cross_check, crop_region, make_ocr
 from .order import classify_styles, order_and_classify, pixel_style_check
@@ -253,7 +253,8 @@ class Pipeline:
             wanted = {Path(f).name for f in files}
             images = [p for p in images if p.name in wanted]
         try:
-            self.run(src_dir, renderers, rerender=rerender, force=force, files=images, nest=False)
+            self.run(src_dir, renderers, rerender=rerender, force=force, files=images, nest=False,
+                     source=archive)
         finally:
             self._cover = None
 
@@ -271,11 +272,15 @@ class Pipeline:
 
     # ---- driver -------------------------------------------------------
     def run(self, input_dir: Path, renderers: list[str], rerender: bool = False, force: bool = False,
-            files: list[Path] | None = None, nest: bool = True) -> None:
+            files: list[Path] | None = None, nest: bool = True, source: Path | None = None) -> None:
+        """source 는 사용자가 준 원래 입력(zip 이면 그 zip). 작품별 용어집을 그 옆에서 찾는다."""
         if nest:
             self.out = self.named_dir(input_dir)
         images = files or list_images(input_dir)
-        glossary = load_glossary(self.cfg.abs(self.cfg.paths.glossary), input_dir)
+        paths = glossary_paths(self.cfg.abs(self.cfg.paths.glossary), source or input_dir, self.out)
+        glossary = load_glossary(*paths)
+        if len(paths) > 1:
+            console.print("  용어집: " + ", ".join(str(p) for p in paths), markup=False, style="dim")
         emit("pages", total=len(images), out=str(self.out))
         console.print(f"[bold]{len(images)}장 처리, 렌더러: {', '.join(renderers)}[/bold]")
         t0 = time.time()

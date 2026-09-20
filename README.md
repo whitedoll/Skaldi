@@ -23,6 +23,35 @@ python scripts/download_models.py --anytext   # 모델·폰트 미리 받기 (�
 Ollama가 실행 중이어야 하고 `config.yaml`의 모델(`hf.co/unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q2_K_XL`, 폴백용 `gemma4:12b` 등)이 받아져 있어야 한다.
 Qwen 렌더러는 `scripts/install_comfyui.py`로 ComfyUI를 설치한 뒤 사용한다 (약 25GB).
 
+## 고유명사·작품별 설정
+
+**용어집** — 인물 이름 표기, 번역 방침, 참고 사항을 넣는다. 세 군데를 읽어 합치고 뒤에 오는 것이 이긴다.
+
+| 순서 | 위치 | 쓰임 |
+|---|---|---|
+| 1 | `glossary.yaml` (프로젝트 루트) | 모든 작품 공통 |
+| 2 | `<zip이름>.glossary.yaml` (zip 옆) 또는 `<폴더>/glossary.yaml` | 그 작품 전용 |
+| 3 | `<출력>/<이름>_ko/glossary.yaml` | 한 번 돌린 뒤 고칠 때 (`--force` 해도 안 지워진다) |
+
+```yaml
+# G:/manga/book.glossary.yaml
+names:
+  高崎梨杏: 타카사키 리안
+  藤ねぇ: 후지 누나
+style: |
+  주인공은 반말, 선배에게는 존댓말.
+notes:
+  - 3권부터 두 사람은 사귀는 사이
+```
+
+`names` 는 같은 키가 있으면 뒤엣것이 덮어쓰고, `style` 과 `notes` 는 이어 붙는다. 실제로 어떤 파일을 읽었는지는 실행 로그에 `용어집: ...` 으로 찍힌다.
+
+**식자 설정** — 글꼴·크기·줄간격처럼 그림에 관한 것은 `config.yaml` 이다. 작품별로 다르게 하려면 복사해서 `config_<이름>.yaml` 로 두고 `--config` 로 고른다 (GUI 는 "설정 파일" 목록에서 고른다).
+
+```bash
+uv run skaldi "book.zip" --config config_book.yaml
+```
+
 ## 사용
 
 `uv sync` 로 설치하면 `skaldi` 명령이 생긴다. 설치 없이 쓰려면 `uv run python -m skaldi ...` 로도 같다.

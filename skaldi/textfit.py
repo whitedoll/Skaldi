@@ -62,6 +62,13 @@ def split_runs(text: str, font_path: str, fallback: str | None) -> list[tuple[st
     return runs
 
 
+def unsupported(text: str, font_path: str, fallback: str | None) -> str:
+    """글자 폰트에도 대체 폰트에도 자형이 없는 글자들(있으면 그 글자). 그대로 그리면 빈 네모가 찍힌다."""
+    bad = [ch for ch in dict.fromkeys(text or "")
+           if ch.strip() and not has_glyph(font_path, ch) and not (fallback and has_glyph(fallback, ch))]
+    return "".join(bad)
+
+
 def text_width(text: str, font_path: str, size: int, fallback: str | None = None) -> float:
     return sum(_measure_draw.textlength(t, font=font(p, size))
                for t, p in split_runs(text, font_path, fallback))

@@ -6,7 +6,7 @@ from typing import Any
 from .config import Config
 from .glossary import glossary_prompt
 from .llm import looks_refused
-from .normalize import leftover_kana, normalize_ko
+from .normalize import leftover_cjk, normalize_ko
 from .ocr import OCR_MISMATCH
 from .order import sfx_allowed_in_bubble, sibling_sfx
 from .page import Page, Region
@@ -47,6 +47,7 @@ def _system(cfg: Config, glossary: dict) -> str:
         "주어진 원문은 한 페이지의 글자를 읽는 순서대로 나열한 것이다. 문맥을 살려 자연스러운 만화 대사체로 번역하라. "
         "원문의 어조·감정·수위를 바꾸지 말고, 요약하거나 검열하거나 설명을 덧붙이지 말라. "
         "말풍선에 들어가야 하므로 간결하게. 일본어 글자를 남기지 말고 전부 한국어로 옮겨라. "
+        "한자는 쓰지 말고 병기도 하지 말라 (무모(無毛) ✕ / 무모 ○). 식자 글꼴에 한자가 없다. "
         "ko 필드에는 번역문만 넣고 번호·괄호·종류 표시 같은 것을 붙이지 말라. "
         "note 필드: 보통 대사면 ok. 사물·동작 소리를 흉내낸 효과음(ドン, ゴキュッ, ボボボ)만 sfx(ko에는 음역). "
         "감탄사·대답·신음·웃음(へぇ, そう, ああっ, クスクス)은 대사이므로 ok. "
@@ -132,8 +133,8 @@ def translate_page(cfg: Config, client, page: Page, glossary: dict) -> None:
         if not r.text_ko:
             r.text_ko = ""
     for r in regions:
-        kana = leftover_kana(r.text_ko)
-        if kana and r.render:
-            page.warnings.append(f"번역문에 가나가 남음 (id={r.id}): {kana}")
+        left = leftover_cjk(r.text_ko)
+        if left and r.render:
+            page.warnings.append(f"번역문에 일본어·한자가 남음 (id={r.id}): {left}")
     sibling_sfx(page.regions)   # 번역 단계에서 효과음으로 확정된 것과 같은 말풍선의 짧은 조각도 묶는다
     page.models["translate"] = ",".join(used) if used else "-"

@@ -157,7 +157,7 @@ def main() -> None:
     pipe = Pipeline(cfg)
     pages = prepare_pages(pipe, images, args.out)
     client = OllamaClient(cfg.llm)
-    glossary = load_glossary(cfg.abs(cfg.paths.glossary), args.input_dir)
+    glossary = load_glossary(cfg.abs(cfg.paths.glossary), args.input_dir / "glossary.yaml")
 
     tmodels = [m for m in args.translate.split(",") if m]
     vmodels = [m for m in args.vision.split(",") if m]

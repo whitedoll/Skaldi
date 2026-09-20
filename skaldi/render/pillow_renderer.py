@@ -2,6 +2,7 @@
 기운 원문은 같은 각도로 돌려 그리고, 작은 글자는 크게 그려 줄인다."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -11,7 +12,7 @@ from ..erase import poly_mask, region_target_box
 from ..normalize import normalize_ko
 from ..page import Page, Region
 from ..textfit import (HALF_CELL_PUNCT, column_steps, fit_polygon, fit_text, fit_vertical, font, has_glyph,
-                       split_runs, split_variation, text_width)
+                       split_runs, split_variation, text_width, unsupported)
 
 # 세로쓰기에서 가로 모양 그대로 쓰면 어색한 문장부호: 세로 전용 자형(CJK 호환 형태)으로 바꾼다
 VERTICAL_FORMS = {
@@ -91,6 +92,13 @@ class PillowRenderer:
             # 정규화 이전에 만든 JSON 으로 다시 그릴 때도 표기를 정리한다 (여러 번 해도 결과가 같다).
             # 폰트가 '…'를 가운데 점(⋯)으로 그려 좁은 말풍선에서 콜론처럼 보이므로 '...'로 통일
             r.text_ko = normalize_ko(r.text_ko).replace("…", "...").replace("‥", "..")
+            # 어느 글꼴에도 없는 글자(주로 한자)는 빼고 그린다. 그대로 두면 빈 네모가 찍힌다
+            # (20쪽 '무모(無毛)구나'). 번역 단계에서 이미 경고가 남지만 옛 JSON 으로 다시 그릴 때도 막는다
+            bad = unsupported(r.text_ko, *self.pick_font(r)[:1], self.fallback_path)
+            if bad:
+                cleaned = "".join(ch for ch in r.text_ko if ch not in bad)
+                page.warnings.append(f"글꼴에 없는 글자를 빼고 그림 (id={r.id}): {bad}")
+                r.text_ko = re.sub(r"\s{2,}", " ", cleaned).strip() or r.text_ko
         caps = self._group_caps(page, base, minimum)
         for r in todo:
             self._draw_region(img, r, page, base, minimum, cap=caps.get(r.group))

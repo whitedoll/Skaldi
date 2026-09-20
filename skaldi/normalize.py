@@ -14,6 +14,9 @@ import re
 _HANGUL = "가-힣ㄱ-ㅎㅏ-ㅣ"
 _BYTES = re.compile(r"(?:<0x[0-9A-Fa-f]{2}>)+")
 _KANA = re.compile(r"[぀-ゟ゠-ヿ]")
+_CJK = re.compile(r"[぀-ゟ゠-ヿ一-鿿㐀-䶿]")
+# 괄호 안이 한자·가나뿐인 병기: 무모(無毛) → 무모. 글꼴에 한자가 없어 빈 네모로 찍힌다
+_CJK_PAREN = re.compile(r"\s*[(（\[【]\s*[一-鿿㐀-䶿぀-ゟ゠-ヿ・々〆ヶ]+\s*[)）\]】]")
 # 한글 뒤에 붙은 호칭만 바꾼다
 _HONORIFIC = [("ちゃん", "쨩"), ("チャン", "쨩"), ("さん", "상"), ("くん", "군"), ("さま", "님"), ("様", "님")]
 _CHARMAP = str.maketrans({
@@ -59,6 +62,7 @@ def normalize_ko(text: str) -> str:
     t = re.sub(rf"(?<=[{_HANGUL}?!.~♡♥)\"' ])[wW]+(?=$|[\s\"')!?.,~♡♥])", lambda m: "ㅋ" * len(m.group(0)), t)
     # 문장부호 사이에 홀로 남은 촉음(ッ/っ): 소리가 없는 표기라 지운다 ("♥♥ッ♥♥")
     t = re.sub(rf"(?<![぀-ゟ゠-ヿ])[ッっ](?![぀-ゟ゠-ヿ])", "", t)
+    t = _CJK_PAREN.sub("", t)                       # 한자 병기 제거 (무모(無毛) → 무모)
     t = re.sub(r"[ \t]{2,}", " ", t).strip()
     return _balance_quotes(t)
 
@@ -66,3 +70,8 @@ def normalize_ko(text: str) -> str:
 def leftover_kana(text: str) -> str:
     """정규화 뒤에도 남은 가나(있으면 그 글자들)."""
     return "".join(dict.fromkeys(_KANA.findall(text or "")))
+
+
+def leftover_cjk(text: str) -> str:
+    """정규화 뒤에도 남은 가나·한자. 식자 글꼴에 한자가 없어 빈 네모로 찍히므로 경고로 알린다."""
+    return "".join(dict.fromkeys(_CJK.findall(text or "")))
