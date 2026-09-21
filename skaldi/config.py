@@ -82,6 +82,9 @@ class RenderCfg(BaseModel):
     overlap_layout: str = "auto"        # 겹친 말풍선 글자 자리: auto(네모·폴리곤 중 작은 글자가 더 큰 쪽, 같으면 네모) | rect | poly
     vertical_short_len: int = 8         # short 모드에서 세로 한 열로 쓸 수 있는 글자 수 (한글·영숫자만 셈)
     group_floor: float = 0.85           # 한 구름 묶음의 글자 크기를 맞출 때 기준 크기의 이 배 밑으로는 내리지 않음
+    free_vertical: bool = True          # 말풍선 밖 세로 글(나레이션·대사)은 원문 열 자리에 세로로 쓴다
+    free_vertical_min_len: float = 16   # 가장 긴 열이 이 글자 수 이상일 때만 세로로 쓴다(짧으면 가로쓰기가 낫다)
+    free_group_floor: float = 0.7       # 원문 크기가 같은 세로 글끼리 크기를 맞출 때, 원문 크기의 이 배 밑으로는 안 내림
     overlap_vertical: str = "short"     # 좌우로 붙은 말풍선을 나눠 좁고 길어진 자리: short(한 열에 드는 짧은 웃음·외침만 세로)
                                         # | all(여러 열 세로쓰기도 더 크게 들어가면) | off(항상 가로)
     match_size: bool = True             # 원문 글자 크기를 재서 기준 크기로 쓴다. 끄면 페이지 높이 비례

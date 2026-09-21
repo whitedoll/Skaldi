@@ -101,9 +101,48 @@ class PillowRenderer:
                 r.text_ko = re.sub(r"\s{2,}", " ", cleaned).strip() or r.text_ko
         self._measure_source(todo, base)
         caps = self._group_caps(page, base, minimum)
+        free = self._free_caps(page, todo, base, minimum)
         for r in todo:
-            self._draw_region(img, r, page, base, minimum, cap=caps.get(r.group))
+            cap = caps.get(r.group) if r.group is not None else free.get(id(r))
+            self._draw_region(img, r, page, base, minimum, cap=cap)
         return img
+
+    def _free_caps(self, page: Page, todo: list[Region], base: int, minimum: int) -> dict[int, int]:
+        """원문 글자 크기가 비슷한 말풍선 밖 세로 글은 번역문도 같은 크기로 맞춘다. {id(r): 상한}
+
+        '비슷하다'는 크기순으로 늘어놓아 이웃끼리 20% 안이고 묶음 전체가 35% 안인 것. 열 폭으로 잰 글자 크기는
+        ±10% 쯤 흔들린다(319쪽: 같은 크기의 두 글이 42·36 으로 측정됐다).
+
+        원문은 같은 크기인데 번역문은 글 양에 따라 제각각이 된다(test02 319쪽: 긴 나레이션은 작게, 짧은
+        대사는 크게). 묶음 안에서 가장 작게 들어가는 크기를 모두의 상한으로 한다. 다만 원문 크기의
+        free_group_floor 배 밑으로는 끌어내리지 않는다 — 한 곳이 유난히 좁다고 전부 작아지면 안 된다."""
+        items = sorted((r for r in todo if r.writing == "vcols" and r.glyph_px and r.group is None),
+                       key=lambda r: r.glyph_px)
+        clusters: list[list[Region]] = []
+        for r in items:
+            if (clusters and r.glyph_px <= clusters[-1][-1].glyph_px * 1.2
+                    and r.glyph_px <= clusters[-1][0].glyph_px * 1.35):
+                clusters[-1].append(r)
+            else:
+                clusters.append([r])
+        caps: dict[int, int] = {}
+        scratch = Image.new("RGB", (page.width, page.height))
+        for cl in clusters:
+            if len(cl) < 2:
+                continue
+            # 크기는 글꼴 보정(font_scale) 전 값으로 견준다. 손글씨체는 같은 크기에서 작아 보여 1.42 배로
+            # 키우는데, 보정 뒤 크기로 상한을 걸면 그 보정이 지워진다
+            nominal = []
+            for r in cl:
+                self._draw_region(scratch, r, page, base, minimum)
+                if r.font_size:
+                    nominal.append(r.font_size / self.pick_font(r)[1])
+            if not nominal:
+                continue
+            cap = max(min(nominal), max(r.glyph_px for r in cl) * self.cfg.render.free_group_floor)
+            for r in cl:
+                caps[id(r)] = int(cap * self.pick_font(r)[1])
+        return caps
 
     def _measure_source(self, todo: list[Region], page_base: int) -> None:
         """영역마다 원문 글자 크기를 되짚어 r.src_font_size 에 넣는다.
@@ -115,7 +154,8 @@ class PillowRenderer:
                 r.src_font_size = None
             return
         for r in todo:
-            r.src_font_size = source_font_size(r.text_ja, r.w(), r.h(), self.cfg.render.src_font_scale)
+            # 세로 열 폭으로 잰 값이 있으면 그것이 더 믿을 만하다(글자 수에 기대지 않는다)
+            r.src_font_size = r.glyph_px or source_font_size(r.text_ja, r.w(), r.h(), self.cfg.render.src_font_scale)
         measured = sorted(r.src_font_size for r in todo if r.src_font_size)
         if not measured:
             return

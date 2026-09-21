@@ -12,6 +12,8 @@ from rich.console import Console
 from rich.markup import escape
 
 from .config import Config
+from .columns import column_boxes, is_vertical_block, merge_unquoted, split_by_color
+from .columns import measure as measure_columns
 from .debug import debug_image
 from .detect import Detector, attach_bubbles
 from .erase import Eraser
@@ -139,6 +141,20 @@ class Pipeline:
         first_is_cover = self._cover is not None and images[0] == self._cover
         return find_frontmatter(images, detect, self.cfg.frontmatter, first_is_cover)
 
+    def _read_columns(self, image: Image.Image, r: Region, ocr) -> tuple[str, float] | None:
+        """여러 열 세로 글자를 열마다 읽어 (이어 붙인 글, 글자 수 가중 확신도). 열이 하나뿐이면 None."""
+        cols, g = measure_columns(image, r.box)
+        if len(cols) < 2:
+            return None
+        r.cols = column_boxes(r.box, cols, g, image.width, image.height)
+        texts, weighted, total = [], 0.0, 0
+        for b in r.cols:
+            t, c = ocr.read_conf(image.crop(tuple(b)))
+            texts.append(t)
+            weighted += c * max(1, len(t))
+            total += max(1, len(t))
+        return "".join(texts), weighted / total
+
     # ---- stages -------------------------------------------------------
     def analyze(self, src: Path, glossary: dict) -> Page:
         """탐지·OCR·순서·번역까지 수행해 Page 를 만든다 (이미지는 만들지 않음)."""
@@ -153,6 +169,10 @@ class Pipeline:
                    box=d.box, bubble_box=bubble, score=round(d.score, 3))
             for i, (d, bubble) in enumerate(attach_bubbles(dets))
         ]
+        # 색이 다른 세로 열 묶음(나레이션 + 분홍 대사)이 한 상자로 잡혔으면 나눈다
+        regions = split_by_color(image, regions)
+        for i, r in enumerate(regions):
+            r.id = i
         # 번호를 휴리스틱 읽기 순서로 다시 매긴다. 비전 모델이 번호를 그대로 돌려줘도
         # 대체로 맞는 순서가 되고, 모델은 틀린 부분만 고치면 된다.
         from .order import heuristic_order
@@ -172,6 +192,12 @@ class Pipeline:
             try:
                 if hasattr(ocr, "read_conf"):
                     r.text_ja, conf = ocr.read_conf(crop)
+                    # 확신이 없고 세로로 긴 덩어리면 열마다 따로 읽어 본다. 224x224 로 줄이면 여러 열이
+                    # 뭉개지지만 한 열씩이면 Baberu 가 학습한 크기다
+                    if conf < self.cfg.ocr.min_confidence and is_vertical_block(r.box):
+                        by_col = self._read_columns(image, r, ocr)
+                        if by_col and by_col[1] > conf:
+                            r.text_ja, conf = by_col
                     r.ocr_conf = round(conf, 3)
                 else:
                     r.text_ja = ocr.read(crop)
@@ -203,6 +229,7 @@ class Pipeline:
                 r.erase = "white" if r.render else "none"
         t3 = time.time()
 
+        merge_unquoted(page)                 # 색으로 나눴지만 한 문장이었던 조각은 다시 합친다
         emit("stage", name="번역")
         translate_page(self.cfg, self.client, page, glossary)
         t4 = time.time()

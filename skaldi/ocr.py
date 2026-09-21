@@ -165,12 +165,17 @@ def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
     for r in page.regions:
         if r.category not in ("dialogue", "narration", "label") or not r.text_ja.strip():
             continue
-        low =r.ocr_conf is not None and r.ocr_conf < oc.min_confidence
+        low = r.ocr_conf is not None and r.ocr_conf < oc.min_confidence
         if r.kind != "free_text" and not low:
             continue
         crop = crop_region(image, r.box, oc.crop_padding)
         try:
-            seen = vision_read(client, cfg.llm.vision_model, crop, max_tokens=400)
+            if low and r.cols and len(r.cols) >= 2:
+                # 긴 여러 열 상자는 비전 모델도 열을 빠뜨리고 읽는다(316쪽 분홍 대사). 열마다 읽는다
+                seen = "".join(vision_read(client, cfg.llm.vision_model, image.crop(tuple(b)))
+                               for b in r.cols)
+            else:
+                seen = vision_read(client, cfg.llm.vision_model, crop, max_tokens=400)
         except Exception as e:  # noqa: BLE001
             page.warnings.append(f"OCR 교차검증 실패 (id={r.id}): {e}")
             continue

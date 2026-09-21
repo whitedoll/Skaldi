@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .columns import dominant_colors, find_columns, glyph_size, ink_glyph_mask, is_vertical_block
 from .config import Config
 from .order import _SOLID_MARKS, pixel_style_check
 from .page import Page, Region
@@ -99,6 +100,60 @@ def _label_writing(r: Region, cfg: Config) -> str:
     if not vertical or lines >= 1.6:
         return "auto"
     return "sideways" if mode == "sideways" else "vertical"
+
+
+def _free_vertical(img: np.ndarray, r: Region, cfg: Config) -> tuple[str, int | None, tuple | None]:
+    """말풍선 밖 세로 글(나레이션·대사)은 번역문도 원문 열 자리에 세로로 쓴다. (쓰기 방식, 원문 글자 크기)
+
+    예전에는 가로쓰기로 바꾸려고 상자를 옆으로 높이의 0.6 배까지 넓혔다. 페이지 높이만 한 세로 나레이션
+    (196x1266)은 폭이 760px 이 되어 번역문이 그림을 덮었다(test02 316·319쪽). 원문 자리에 세로로 쓰면
+    지운 자리 안에 들어가고, 원문 열 폭을 글자 크기로 쓰면 원문과 같은 크기가 된다.
+
+    세 번째 값은 (글자 채움 색, 둘레 색). 두꺼운 흰 외곽선을 두른 글씨는 measure_text_style 이 흰 외곽선을
+    글자 색으로 잡는다(test02: 분홍 글씨가 흰색·외곽선 없음으로 측정됐다). 열 찾기는 흰색이 아닌 조각만
+    글자로 보므로 채움 색을 바로 잰다."""
+    # 말풍선 글자로 분류됐어도 감싸는 말풍선을 못 찾았으면 그림 위 글자다. 이런 영역은 가로쓰기용으로
+    # 옆으로 넓혀져 그림을 덮었다(316쪽 오른쪽 열: 120px 열이 322px 로). 말풍선이 있으면 그 안에 갇히므로
+    # 원래대로 둔다 — 글자에 딱 붙은 네모 나레이션 상자(Hayashi 39곳)는 지금처럼 가로쓰기가 깔끔하다
+    on_art = r.kind == "free_text" or (r.kind == "bubble_text" and not r.bubble_box)
+    if not (cfg.render.free_vertical and on_art and r.render
+            and r.category in ("dialogue", "narration") and is_vertical_block(r.box)):
+        return "auto", None, None
+    x1, y1, x2, y2 = r.box
+    cols, g = find_columns(img[max(0, y1):y2, max(0, x1):x2])
+    if not cols:
+        return "auto", None, None
+    # 열이 짧으면 가로로 바꿔도 조금만 넓어지고, 가로쓰기가 더 크고 읽기 쉽다(Sevengar: 열 평균 11자,
+    # 세로로 바꾸니 글자가 작아졌다). 긴 열(test02 평균 25자)만 세로로 쓴다
+    # 글자 수는 열 폭으로 잰 글자 크기로 센다. 조각 크기(g)는 보통 검은 글씨에서 획 하나라 작게 잡혀
+    # 열이 실제보다 길게 세어진다(흰 외곽선 글씨는 조각이 글자 하나라 차이가 없다)
+    size = glyph_size(cols, g)
+    if max(c.y2 - c.y1 for c in cols) / size < cfg.render.free_vertical_min_len:
+        return "auto", None, None
+    return "vcols", size, (*dominant_colors(cols), len(cols))
+
+
+def _is_white(c) -> bool:
+    return bool(c) and 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 200
+
+
+def _fill_in_halo(img: np.ndarray, r: Region, halo) -> bool:
+    """글자마다 흰 외곽선을 두른 글씨는 외곽선은 남기고 글자 채움만 외곽선 색으로 덮는다. 했으면 True.
+
+    LaMa 로 외곽선까지 지우면 둘레의 검은 바깥선을 따라 검게 메워져, 흰 띠였던 자리가 검은 띠가 됐다
+    (test02 316쪽). 흰 띠를 남기면 원문과 같은 모양 위에 번역문을 쓸 수 있다."""
+    if not _is_white(halo):
+        return False
+    h, w = img.shape[:2]
+    pad = 24
+    x1, y1, x2, y2 = max(0, r.box[0] - pad), max(0, r.box[1] - pad), min(w, r.box[2] + pad), min(h, r.box[3] + pad)
+    inner = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
+    m = ink_glyph_mask(img[y1:y2, x1:x2], inner)
+    if not m.any():
+        return False
+    m = cv2.dilate(m.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2) > 0
+    img[y1:y2, x1:x2][m] = halo
+    return True
 
 
 def _art_text_mask(gray: np.ndarray, box: list[int], dilate: int,
@@ -508,9 +563,16 @@ class Eraser:
         # 기울기는 지우기 전 원본에서 잰다 (지우는 도중에는 이웃 글자가 이미 사라져 있을 수 있다)
         orig_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         pixel_style_check(orig_gray, page)        # 획이 고른 글자는 모델 판정과 달라도 인쇄체로
+        col_colors: dict[int, tuple] = {}          # id(r) → 열로 잰 (채움 색, 둘레 색)
         for r in page.regions:
             r.angle, r.rot_box = 0.0, None
             r.writing = _label_writing(r, self.cfg)
+            if r.writing == "auto":
+                r.writing, r.glyph_px, colors = _free_vertical(img, r, self.cfg)
+                if colors:
+                    col_colors[id(r)] = colors
+            if r.writing == "vcols":
+                continue                            # 원문 열 자리에 똑바로 세워 쓴다
             # 기울기는 글줄에서 나온다. 기호를 뺀 글자가 3자 미만이면('ん♡') 글줄이라 할 수 없다
             if (r.render and r.erase != "none" and self.cfg.render.follow_angle
                     and len(re.findall(r"\w", r.text_ja)) >= 3):
@@ -529,7 +591,22 @@ class Eraser:
                     measure_text_style(img, r, self.cfg.render.bold_stroke_ratio)
                 except Exception as ex:  # noqa: BLE001
                     page.warnings.append(f"스타일 측정 실패 (id={r.id}): {ex}")
-            if r.erase == "white":
+            if id(r) in col_colors:
+                fill, halo, ncols = col_colors[id(r)]
+                # 여러 열이 일정한 간격으로 늘어선 글, 글자마다 흰 외곽선을 두른 글은 조판한 인쇄체다.
+                # 흰 외곽선을 두른 굵은 인쇄체는 획 측정이 외곽선에 흔들려(test02 320쪽: 굵기 비율 1.51)
+                # 손글씨로 판정되고, 펜 글씨체로 가늘고 작게 그려졌다
+                if r.style == "hand" and (ncols >= 2 or _is_white(halo)):
+                    r.style = "gothic"
+                    r.notes = (r.notes + " 글꼴:조판 글씨→인쇄체").strip()
+            if id(r) in col_colors and self.cfg.render.match_color:
+                r.text_rgb = fill
+                # 둘레가 글자와 밝기가 크게 다를 때만 외곽선으로 본다(같으면 그냥 배경)
+                lum = lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]  # noqa: E731
+                r.outline_rgb = halo if halo and abs(lum(halo) - lum(fill)) > 80 else None
+            if id(r) in col_colors and _fill_in_halo(img, r, col_colors[id(r)][1]):
+                pass                                # 흰 외곽선은 두고 글자만 지웠다
+            elif r.erase == "white":
                 erase_bubble_text(img, r, e.bubble_padding,
                                   lama_mask=lama_mask if e.lama else None)
             elif r.erase == "lama":

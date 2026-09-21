@@ -26,6 +26,9 @@ class Region(BaseModel):
     erase: EraseMode = "white"
     font_size: int | None = None              # 렌더러가 실제 사용한 크기
     src_font_size: int | None = None          # 원문 글자 크기 추정값 (기준 크기로 쓴다)
+    glyph_px: int | None = None               # 세로 열 폭으로 잰 원문 글자 크기. 있으면 src_font_size 보다 우선
+    cols: list[list[int]] | None = None       # 여러 열을 열마다 읽었을 때의 열 상자(오른쪽 열부터)
+    split_from: int | None = None             # 색으로 나눈 조각이면 원래 탐지 상자 번호 (따옴표 대사가 없으면 다시 합친다)
     text_color: str = "black"                 # 말풍선 배경이 어두우면 white (지우기 단계에서 결정)
     vertical: bool = False                    # 세로쓰기로 그렸는지
     style: str = "gothic"                     # 글꼴 계열: gothic(고딕/인쇄체) | mincho(명조) | hand(손글씨)
