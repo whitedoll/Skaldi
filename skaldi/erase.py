@@ -67,6 +67,13 @@ def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
     glyph = cv2.dilate(strict, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
     near = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)))
     loose = ((np.abs(lum - bg_lum) > 12).astype(np.uint8) * 255) & near
+    # 반투명 말풍선(바탕이 옅은 회색)에서 글자에 두른 순백 외곽선은 바탕과 차이가 12 안팎이라 위 기준에
+    # 걸리지 않아, 글자 모양의 흰 잔상으로 남았다(test04 23쪽 'な…ッ！？': 바탕 243, 외곽선 255).
+    # 글자 바로 둘레에서 바탕보다 뚜렷이 밝은(순백에 가까운) 픽셀도 외곽선으로 본다
+    if bg_lum < 248:
+        halo_near = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17)))
+        whiter = (lum >= max(bg_lum + 6, 248)).astype(np.uint8) * 255
+        loose = cv2.bitwise_or(loose, whiter & halo_near)
     glyph = cv2.bitwise_or(glyph, loose)
 
     # 글자 상자(+여백) 안만 지운다. 같은 말풍선의 다른 글자(효과음 등)는 건드리지 않는다.
@@ -248,6 +255,48 @@ def _restore_dropped(kept: np.ndarray, glyph: np.ndarray, strict: np.ndarray, li
     return cv2.bitwise_and(cv2.bitwise_and(glyph, grown), cv2.bitwise_not(kept))
 
 
+def _see_through(crop: np.ndarray, glyph: np.ndarray, bg: np.ndarray, limit: float = 0.08) -> bool:
+    """그림이 비치는 반투명 말풍선인가. 그렇다면 글자 자리를 흐린 바탕색으로 평평하게 메우면 안쪽 그림 선이
+    끊기고 글자 덩어리 모양의 흰 조각이 남는다(test04 23쪽 '何これ' '妾の視界'). LaMa 로 메워야 한다.
+
+    말풍선 안쪽을 테두리에서 6px 떨어뜨리고 글자 둘레도 뺀 곳에서, 바탕보다 뚜렷이 어두운(선) 픽셀의
+    비율로 가린다. 실측: 반투명 말풍선 0.125~0.214, 평범한 말풍선 0.021 이하. 다른 작품에서 이 기준에
+    걸리는 말풍선은 1~12%."""
+    inside = (bg > 0) | (glyph > 0)
+    inner = cv2.erode(inside.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=6) > 0
+    zone = inner & ~(cv2.dilate(glyph, np.ones((3, 3), np.uint8), iterations=3) > 0)
+    if zone.sum() < 200:
+        return False
+    v = _lum(crop)[zone]
+    return float((v < np.median(v) - 30).mean()) > limit
+
+
+def _center_on_text(body: list[int], text: list[int], bubble: list[int] | None,
+                    tol: float = 0.08) -> list[int]:
+    """본체 상자가 원문 글자 중심에서 크게 어긋나면 원문 중심을 기준으로 대칭이 되게 줄인다.
+
+    본체는 말풍선 안쪽을 flood fill 해서 잰다. 바탕이 가장자리로 옅어져 옆 그림(밝은 피부)과 이어지면
+    채우기가 말풍선 밖으로 새어 본체가 한쪽으로 커지고, 번역문이 그쪽으로 밀려 그려졌다(test05 055쪽:
+    오른쪽·아래로 약 30px). 작가는 글을 말풍선 가운데 두므로 원문 글자 중심이 더 믿을 만하다.
+    탐지기 말풍선 상자 밖으로 나간 부분은 먼저 잘라낸다. 어긋남이 본체 크기의 tol 이하면 그대로 둔다
+    (꼬리 쪽으로 조금 치우친 말풍선까지 줄이면 자리만 좁아진다)."""
+    x1, y1, x2, y2 = body
+    if bubble:
+        x1, y1, x2, y2 = max(x1, bubble[0]), max(y1, bubble[1]), min(x2, bubble[2]), min(y2, bubble[3])
+    if x2 - x1 < 10 or y2 - y1 < 10:
+        return list(body)
+    cx, cy = (text[0] + text[2]) / 2, (text[1] + text[3]) / 2
+    if not (x1 < cx < x2 and y1 < cy < y2):
+        return [x1, y1, x2, y2]
+    if abs((x1 + x2) / 2 - cx) > tol * (x2 - x1):
+        half = min(cx - x1, x2 - cx)
+        x1, x2 = int(round(cx - half)), int(round(cx + half))
+    if abs((y1 + y2) / 2 - cy) > tol * (y2 - y1):
+        half = min(cy - y1, y2 - cy)
+        y1, y2 = int(round(cy - half)), int(round(cy + half))
+    return [x1, y1, x2, y2]
+
+
 def _drop_line_parts(mask: np.ndarray, long_ratio: float = 3.0, fill_max: float = 0.22) -> np.ndarray:
     """글자 덩어리 크기의 중앙값보다 훨씬 길면서 속이 빈 성분(테두리 선, 그림 윤곽)을 마스크에서 뺀다."""
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -318,11 +367,14 @@ def erase_bubble_text(img: np.ndarray, r: Region, pad: int, mask_out: np.ndarray
     tbox = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
     restored: list = []
     glyph, bg, _, mixed = glyph_mask(crop, tbox, restored_out=restored)
+    if not mixed and _see_through(crop, glyph, bg):
+        mixed = True
     if restored and restored[0].any():
-        if lama_mask is not None:
-            lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2], restored[0])
-        else:
-            glyph = cv2.bitwise_or(glyph, restored[0])
+        glyph = cv2.bitwise_or(glyph, restored[0])
+        # 되살린 조각이 있다 = 바탕이 평평하지 않은 말풍선이다(가시 테두리·그라데이션). 이 글자 전체를
+        # LaMa 로 메운다. 되살린 조각만 LaMa 로, 나머지는 흐린 바탕색으로 메우면 두 방식의 경계가
+        # 세로 띠로 드러났다(test05 055쪽)
+        mixed = True
     bg_px = crop[bg > 0]
     if len(bg_px) == 0:
         return
@@ -789,7 +841,8 @@ class Eraser:
         ov = max(0, min(bx2, body[2]) - max(bx1, body[0])) * max(0, min(by2, body[3]) - max(by1, body[1]))
         if ov < 0.5 * box_area:
             return None
-        r.body_box = _blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit)
+        r.body_box = _center_on_text(_blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit),
+                                     r.box, r.bubble_box)
         return body
 
     def _widen(self, img: np.ndarray, gray: np.ndarray, r: Region, page: Page,
