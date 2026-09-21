@@ -83,8 +83,21 @@ def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
         bg = cv2.bitwise_and(halo, cv2.bitwise_not(glyph))
     else:
         inside = _bubble_region(lum, bg_lum, glyph, min(diff, 30), tbox)
-        glyph = cv2.bitwise_and(glyph, inside)
-        bg = cv2.bitwise_and(cv2.bitwise_not(glyph), inside)
+        kept = cv2.bitwise_and(glyph, inside)
+        # 말풍선 안쪽 판정이 글자를 통째로 빼먹는 경우가 있다. 가장자리를 빗금(집중선)으로 채운 말풍선에서
+        # 흰 외곽선을 두른 글자 덩어리가 빗금을 타고 말풍선 밖까지 이어지면, 글자가 '갇힌 구멍'이 아니게
+        # 되어 안쪽에서 빠진다(Kamaboko 23쪽: 글자 픽셀의 1~2% 만 지우고 원문이 그대로 남았다).
+        # 글자 상자 안쪽 글자 픽셀이 절반 넘게 빠지면 이 판정을 버리고 배경이 섞인 말풍선처럼 다룬다.
+        core = np.zeros((h, w), bool)
+        core[max(0, ty1 + 3):max(0, ty2 - 3), max(0, tx1 + 3):max(0, tx2 - 3)] = True
+        want = int(((strict > 0) & core).sum())
+        if want >= 50 and int(((kept > 0) & (strict > 0) & core).sum()) < 0.5 * want:
+            mixed = True
+            halo = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+            bg = cv2.bitwise_and(halo, cv2.bitwise_not(glyph))
+        else:
+            glyph = kept
+            bg = cv2.bitwise_and(cv2.bitwise_not(glyph), inside)
     if not bg.any():
         bg = cv2.bitwise_not(glyph)
     return glyph, bg, bg_lum, mixed
