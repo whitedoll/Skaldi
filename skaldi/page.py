@@ -45,6 +45,7 @@ class Region(BaseModel):
     overflow: bool = False                    # 최소 크기에서도 넘침
     refused: bool = False                     # 번역 거부·순화 감지
     ocr_backend: str = ""
+    ocr_conf: float | None = None             # Baberu 토큰 확률 평균. 낮으면 헛읽기일 가능성이 크다
     notes: str = ""
 
     def w(self) -> int:

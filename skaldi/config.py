@@ -31,6 +31,9 @@ class OcrCfg(BaseModel):
     crop_padding: int = 4
     cross_check: bool = True            # 말풍선 밖 글자를 비전 모델로 한 번 더 읽어 OCR 환각을 거른다
     cross_check_min: float = 0.2        # 두 읽기의 일치도가 이 값 미만이면 원본 유지(needs_review)
+    min_confidence: float = 0.8         # Baberu 확신도가 이보다 낮으면 말풍선 안 글자도 비전 모델로 다시 읽는다
+    vision_adopt: bool = True           # Baberu 가 헛읽었다고 보이면 비전 모델 판독으로 바꿔 번역한다
+    vision_adopt_min_chars: int = 3     # 비전 판독이 이보다 짧으면('嫌' 'ッ' 빈칸) 채택하지 않고 원본 유지
 
 
 class LlmCfg(BaseModel):

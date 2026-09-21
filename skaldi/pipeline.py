@@ -170,7 +170,11 @@ class Pipeline:
         for r in page.regions:
             crop = crop_region(image, r.box, self.cfg.ocr.crop_padding)
             try:
-                r.text_ja = ocr.read(crop)
+                if hasattr(ocr, "read_conf"):
+                    r.text_ja, conf = ocr.read_conf(crop)
+                    r.ocr_conf = round(conf, 3)
+                else:
+                    r.text_ja = ocr.read(crop)
             except Exception as e:  # noqa: BLE001
                 page.warnings.append(f"OCR 실패 (id={r.id}): {e}")
             r.ocr_backend = ocr.name
