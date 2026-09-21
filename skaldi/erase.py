@@ -31,8 +31,8 @@ def _lum(rgb: np.ndarray) -> np.ndarray:
     return (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]).astype(np.float32)
 
 
-def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
-               ) -> tuple[np.ndarray, np.ndarray, float, bool]:
+def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40,
+               restored_out: list | None = None) -> tuple[np.ndarray, np.ndarray, float, bool]:
     """크롭(말풍선 전체) 안에서 글자 상자 tbox(크롭 좌표) 의 글자 획 마스크를 구한다.
     1) 배경 밝기 = 글자 상자 바로 바깥 띠(말풍선 안쪽)의 중앙값.
     2) 배경과 diff 이상 다른 픽셀(검은 획, 흰 외곽선)이 글자 후보. 주변의 옅은 잔상도 포함.
@@ -96,8 +96,12 @@ def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
             halo = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
             bg = cv2.bitwise_and(halo, cv2.bitwise_not(glyph))
         else:
+            # 일부 열만 빠진 경우(가시·옅어지는 테두리)는 빠진 글자 덩어리만 되살려 LaMa 몫으로 넘긴다
+            restored = _restore_dropped(kept, glyph, strict, limit, tbox)
+            if restored_out is not None:
+                restored_out.append(restored)
             glyph = kept
-            bg = cv2.bitwise_and(cv2.bitwise_not(glyph), inside)
+            bg = cv2.bitwise_and(cv2.bitwise_not(cv2.bitwise_or(glyph, restored)), inside)
     if not bg.any():
         bg = cv2.bitwise_not(glyph)
     return glyph, bg, bg_lum, mixed
@@ -194,6 +198,56 @@ def _art_text_mask(gray: np.ndarray, box: list[int], dilate: int,
     return m
 
 
+def _restore_dropped(kept: np.ndarray, glyph: np.ndarray, strict: np.ndarray, limit: np.ndarray,
+                     tbox: tuple[int, int, int, int]) -> np.ndarray:
+    """말풍선 안쪽 판정에서 빠진 글자 덩어리를 되살린다.
+
+    안쪽 판정은 글자를 '말풍선 바탕 안에 갇힌 구멍'으로 찾는다. 가장자리가 가시·빗금으로 된 말풍선이나
+    바탕이 가장자리로 옅어지는 말풍선에서는, 가장자리에 가까운 열이 테두리 쪽으로 이어져 갇힌 구멍이
+    아니게 되고 그 열만 통째로 빠진다(test05 055쪽: 4열 중 바깥 두 열의 일부가 남았다).
+    글자 상자 안쪽에 대부분 들어 있고, 절반 넘게 빠졌고, 테두리 선처럼 길고 속이 빈 모양이 아니고,
+    크롭 가장자리에 닿지 않은 덩어리만 되살린다 — 그래야 말풍선 테두리와 그 바깥은 여전히 안 지운다.
+    되살린 조각의 마스크를 돌려준다. 이 조각은 테두리 가까이라 평평하게 메우지 말고 LaMa 로 메운다
+    (흐린 바탕색으로 메우면 가시 무늬가 네모나게 잘려 나간다). 나머지 글자는 원래대로 메운다 — 말풍선 전체를
+    LaMa 로 넘기면 흰 말풍선이 얼룩진다(Sevengar 005쪽).
+
+    크기·굵기로 글자답지 않은 것은 거르지만 완전히 가를 수는 없다(말풍선 안 그림 선이 글자 굵기면 걸린다).
+    그래도 LaMa 로 메우는 작은 조각이라, 잘못 걸려도 그 조각이 주변 무늬로 메워지는 데 그친다."""
+    h, w = strict.shape
+    tx1, ty1, tx2, ty2 = tbox
+    core = np.zeros((h, w), np.uint8)
+    core[max(0, ty1 + 3):max(0, ty2 - 3), max(0, tx1 + 3):max(0, tx2 - 3)] = 1
+    cand = _drop_line_parts(cv2.bitwise_and(strict, limit))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    # 글자 한 칸의 굵기: 제대로 잡힌 글자 덩어리들의 짧은 변을 면적 가중으로 모은 중앙값. 열이면 열 폭,
+    # 줄이면 줄 높이다. 단순 중앙값은 점·탁점 같은 작은 조각에 끌려 작아진다(test05: 62px 열이 상한을 넘었다)
+    thick = [(min(int(stats[i, 2]), int(stats[i, 3])), int(stats[i, 4])) for i in range(1, n)
+             if stats[i, 4] >= 30 and (kept[labels == i] > 0).mean() >= 0.5]
+    if not thick:
+        return np.zeros((h, w), np.uint8)
+    thick.sort()
+    weights = np.cumsum([a for _, a in thick])
+    char = float(thick[int(np.searchsorted(weights, weights[-1] / 2))][0])
+    add = np.zeros((h, w), np.uint8)
+    for i in range(1, n):
+        x, y, bw, bh, area = (int(v) for v in stats[i])
+        if area < 12 or x == 0 or y == 0 or x + bw >= w or y + bh >= h:
+            continue
+        comp = labels == i
+        if (core[comp].sum() < 0.6 * area) or ((kept[comp] > 0).sum() >= 0.5 * area):
+            continue
+        # 글자답지 않은 것은 되살리지 않는다. 실측(작품 8종)에서 되살린 것 대부분이 글자가 아니었다 —
+        # 그림 선·집중선(가늘다), 말풍선 가시 끝 조각(작다), 글자 상자에 걸친 인물 소매(너무 두껍다)
+        if not (0.5 * char <= min(bw, bh) <= 1.8 * char and area >= 0.5 * char * char
+                and area >= 0.25 * bw * bh):
+            continue
+        add[comp] = 255
+    if not add.any():
+        return add
+    grown = cv2.dilate(add, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    return cv2.bitwise_and(cv2.bitwise_and(glyph, grown), cv2.bitwise_not(kept))
+
+
 def _drop_line_parts(mask: np.ndarray, long_ratio: float = 3.0, fill_max: float = 0.22) -> np.ndarray:
     """글자 덩어리 크기의 중앙값보다 훨씬 길면서 속이 빈 성분(테두리 선, 그림 윤곽)을 마스크에서 뺀다."""
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -262,7 +316,13 @@ def erase_bubble_text(img: np.ndarray, r: Region, pad: int, mask_out: np.ndarray
     if crop.size == 0:
         return
     tbox = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
-    glyph, bg, _, mixed = glyph_mask(crop, tbox)
+    restored: list = []
+    glyph, bg, _, mixed = glyph_mask(crop, tbox, restored_out=restored)
+    if restored and restored[0].any():
+        if lama_mask is not None:
+            lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2], restored[0])
+        else:
+            glyph = cv2.bitwise_or(glyph, restored[0])
     bg_px = crop[bg > 0]
     if len(bg_px) == 0:
         return
