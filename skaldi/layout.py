@@ -115,3 +115,48 @@ def bubble_for(box: list[int], bubbles: list[tuple[list[int], np.ndarray]], min_
         if cov >= best_cov:
             best, best_cov = m, cov
     return best
+
+
+SFX_NOTE = "분할:효과음"
+
+
+def mark_sfx(page, items: list[dict] | None, shape: tuple[int, int], min_cover: float = 0.15) -> int:
+    """분할 모델이 효과음으로 본 글자는 번역해 그리지 않고 원본을 둔다. 바꾼 영역 수를 돌려준다.
+
+    손글씨 효과음은 번역하지 않기로 했다. 그동안은 비전·번역 모델의 판단과 글꼴 판정(손글씨인가)을
+    엮어 가렸는데, 손글씨 효과음을 OCR 이 헛읽으면('射的精米' 'おはようございます' '．．．') 대사로
+    번역돼 그려졌다. 분할 모델은 모양으로 효과음을 따로 구분한다.
+
+    영역 상자 안에서 효과음 마스크가 min_cover 이상이고 글자 마스크보다 넓을 때만 효과음으로 본다.
+    실측(작품 6종·테스트 페이지 721 영역): 지금 번역해 그리는데 이 기준에 걸린 것 55개 중 52개가
+    손글씨 효과음·신음이었다. 예외는 원 안의 로고 글자('催眠'), 손글씨 단어('また'), 손글씨 나레이션
+    ('朝の空', 0.14 라 기준에 안 걸린다). test02·04·05 의 인쇄체 나레이션·대사는 하나도 걸리지 않았다."""
+    if not items:
+        return 0
+    # 같은 글자를 효과음과 글자로 겹쳐 잡는 경우가 흔하다(Kamaboko 08쪽 'オオォォォ': 효과음 0.50, 글자
+    # 0.44 로 같은 픽셀). 마스크를 그냥 합치면 두 비율이 같아져 가를 수 없으므로, 픽셀마다 확신도가 더
+    # 높은 쪽 분류로 칠한다
+    sfx_conf = np.zeros(shape, np.float32)
+    txt_conf = np.zeros(shape, np.float32)
+    for it in items:
+        if it["cls"] in ("onomatopoeia", "text"):
+            m = rasterize(it, shape) > 0
+            tgt = sfx_conf if it["cls"] == "onomatopoeia" else txt_conf
+            np.maximum(tgt, np.where(m, it["conf"], 0).astype(np.float32), out=tgt)
+    sfx = sfx_conf > txt_conf
+    txt = txt_conf > sfx_conf
+    if not sfx.any():
+        return 0
+    n = 0
+    for r in page.regions:
+        if r.category == "sfx" or not r.text_ja.strip():
+            continue
+        x1, y1, x2, y2 = r.box
+        area = max(1, (x2 - x1) * (y2 - y1))
+        sc = float(sfx[y1:y2, x1:x2].sum()) / area
+        tc = float(txt[y1:y2, x1:x2].sum()) / area
+        if sc >= min_cover and sc > tc:
+            r.category, r.render, r.erase = "sfx", False, "none"
+            r.notes = (r.notes + f" {SFX_NOTE}({sc:.2f}/{tc:.2f})").strip()
+            n += 1
+    return n

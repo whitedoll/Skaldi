@@ -107,7 +107,9 @@ class RenderCfg(BaseModel):
 
 class LayoutCfg(BaseModel):
     """말풍선·글자·효과음 분할 모델(koharu-layout-rfdetr-seg). 판정 근거는 layout.py 참고."""
-    enabled: bool = False               # 켜면 장당 약 2.4초(번역 모델과 같은 GPU 에서). 지금은 말풍선 본체 측정에만 쓴다
+    enabled: bool = True                # 장당 약 2.4초(번역 모델과 같은 GPU 에서)
+    sfx: bool = True                    # 효과음으로 분할된 글자는 번역해 그리지 않고 원본을 둔다
+    body: bool = False                  # 말풍선 본체를 모델 윤곽으로도 재어 넓은 쪽을 쓴다(효과는 거의 중립)
     repo: str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152"
     bubble_threshold: float = 0.5       # 모델 카드 권장값
     text_threshold: float = 0.25

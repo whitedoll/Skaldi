@@ -51,9 +51,11 @@ translate:
   source_lang: 일본어
   target_lang: 한국어
 
-layout:                         # 말풍선·글자·효과음 분할 모델. 말풍선 윤곽으로 글자 자리를 잰다
-  enabled: false                # true 면 색 채우기와 모델 윤곽으로 잰 말풍선 본체 중 넓은 쪽을 쓴다.
-                                # 작품 6종 표본 283개에서 약 97% 는 같고 나아짐·나빠짐이 비슷해 기본은 끈다
+layout:                         # 말풍선·글자·효과음 분할 모델(koharu). 장당 약 2.4초
+  enabled: true
+  sfx: true                     # 효과음으로 분할된 글자는 번역하지 않고 원본을 둔다(손글씨 효과음)
+  body: false                   # 말풍선 본체를 모델 윤곽으로도 재어 넓은 쪽을 쓴다. 작품 6종 표본
+                                # 283개에서 약 97% 같고 나아짐·나빠짐이 비슷해 기본은 끈다
   repo: mayocream/koharu-layout-rfdetr-seg-2xl-1152   # Manga109 학습(학술·비상업). 처음 쓸 때 models/ 로 받는다
   bubble_threshold: 0.5
   text_threshold: 0.25

@@ -135,6 +135,14 @@ class Pipeline:
         L.save(path, items)
         return items
 
+    def _mark_layout_sfx(self, page: Page, items: list | None) -> None:
+        if not (self.cfg.layout.sfx and items):
+            return
+        from .layout import mark_sfx
+        n = mark_sfx(page, items, (page.height, page.width))
+        if n:
+            console.print(f"  분할 모델이 효과음으로 본 {n}개는 원본을 둡니다", style="dim")
+
     def renderer(self, name: str):
         if name not in self._renderers:
             self._renderers[name] = make_renderer(name, self.cfg)
@@ -211,6 +219,10 @@ class Pipeline:
             page.regions.append(r)
         page.regions.sort(key=lambda r: r.id)
         page.models["detector"] = self.cfg.detector.repo
+        # 분할은 탐지 직후에 한다(효과음 판정이 분류 단계에서 쓴다). 결과는 layout/ 에 남겨 그릴 때 다시 쓴다
+        layout_items = self.layout_items(src, image, force=True)
+        if layout_items is not None:
+            page.models["layout"] = self.cfg.layout.repo
         t1 = time.time()
 
         emit("stage", name="OCR")
@@ -242,6 +254,7 @@ class Pipeline:
                 classify_styles(self.cfg, self.client, image, page)
             # 번역 전에 글꼴 판정을 원문 획으로 보정한다 (번역 단계의 손글씨 효과음 판정이 이 값을 쓴다)
             pixel_style_check(np.array(image.convert("L")), page)
+            self._mark_layout_sfx(page, layout_items)     # 교차검증 전에: 효과음은 다시 읽을 필요가 없다
             # Baberu 가 못 읽는 손글씨에서 지어낸 문장은 번역 전에 거른다 (LLM OCR 이면 같은 모델이라 의미 없음)
             if self.cfg.ocr.cross_check and self.ocr.name == "baberu":
                 emit("stage", name="OCR 교차검증")
@@ -255,6 +268,7 @@ class Pipeline:
                 r.category = "dialogue" if r.kind == "bubble_text" else "unknown"
                 r.render = r.kind == "bubble_text"
                 r.erase = "white" if r.render else "none"
+            self._mark_layout_sfx(page, layout_items)
         t3 = time.time()
 
         dots_over_strokes(image, page)       # 점으로 잘못 읽은 손글씨 효과음은 원본을 둔다

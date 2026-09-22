@@ -780,7 +780,7 @@ class Eraser:
         # (탐지기가 준 bubble_box 는 꼬리·뿔까지 감싸서 중심이 본체와 어긋난다).
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         tilted: dict[int, tuple[float, float, float, float]] = {}     # id(r) → 세운 말풍선 상자
-        bubbles = bubble_masks(page.layout, (h, w))
+        bubbles = bubble_masks(page.layout, (h, w)) if self.cfg.layout.body else []
         for r in page.regions:
             if not (r.render and r.erase == "white" and r.kind == "bubble_text"):
                 continue
