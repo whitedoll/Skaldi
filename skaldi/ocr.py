@@ -149,6 +149,56 @@ def vision_read(client, model: str, crop: Image.Image, max_tokens: int = 160) ->
         raise
 
 
+def _vision_stable(client, cfg: Config, image: Image.Image, r, seen: str, page) -> bool:
+    """비전 판독을 여백을 달리해 한 번 더 읽어, 두 판독이 맞을 때만 믿는다.
+
+    비전 모델은 인쇄체는 정확히 읽지만 손글씨 효과음에서는 문장을 지어낸다(Kamaboko 異世界 08쪽:
+    'んほぉぉ' 를 'おはようございます' 로). 지어낸 판독은 매번 달라진다. 실측: 인쇄체 0.91~1.00,
+    지어낸 판독 0.00~0.33 ('おはようございます' ↔ 'んぼまぼま', 'ほんぼぼ' ↔ 'こんにちは')."""
+    try:
+        again = vision_read(client, cfg.llm.vision_model, crop_region(image, r.box, 16), max_tokens=400)
+    except Exception:  # noqa: BLE001
+        return False
+    agree = ocr_agreement(seen, again)
+    if agree < cfg.ocr.vision_consistency:
+        page.warnings.append(f"비전 판독이 흔들려 쓰지 않음 (id={r.id}, 일치 {agree:.2f}): {seen[:16]} / {again[:16]}")
+        return False
+    return True
+
+
+_ONLY_DOTS = re.compile(r"^[\s．。…・‥\.､、,，]+$")
+
+
+def dots_over_strokes(image: Image.Image, page, limit: float = 0.22) -> None:
+    """점(．．．)으로만 읽혔는데 원문에 큰 획이 있으면 손글씨 효과음을 잘못 읽은 것이다. 원본을 둔다.
+
+    Baberu 는 말풍선을 가로지르는 큰 손글씨 효과음('オオッ' 'イグッ')을 '．．．' 로 읽고, 확신도도 0.8 넘게
+    준다(교차검증을 피한다). 그러면 원문을 지우고 '...' 를 그렸다(Kamaboko 異世界 23곳). 진짜 말없음표
+    말풍선은 점이 작다. 글자 상자 짧은 변 대비 가장 큰 획 덩어리: 말없음표 0.19 이하, 효과음 0.26 이상
+    (다른 작품에서 점으로 읽힌 0.25 이상 8곳도 모두 효과음이었다)."""
+    import cv2
+    import numpy as np
+
+    arr = None
+    for r in page.regions:
+        if not r.text_ja.strip() or not _ONLY_DOTS.match(r.text_ja) or r.category == "sfx":
+            continue
+        if arr is None:
+            arr = np.asarray(image.convert("L"))
+        x1, y1, x2, y2 = r.box
+        g = arr[max(0, y1):y2, max(0, x1):x2]
+        if g.size == 0:
+            continue
+        h, w = g.shape
+        n, _, st, _ = cv2.connectedComponentsWithStats((g < 128).astype(np.uint8), connectivity=8)
+        sizes = [max(st[i][2], st[i][3]) for i in range(1, n) if st[i][4] >= 6
+                 and not (st[i][0] == 0 or st[i][1] == 0 or st[i][0] + st[i][2] >= w or st[i][1] + st[i][3] >= h)]
+        ratio = max(sizes) / min(h, w) if sizes else 0.0
+        if ratio >= limit:
+            r.category, r.render, r.erase = "sfx", False, "none"
+            r.notes = (r.notes + f" 점 판독+큰 획({ratio:.2f})→효과음").strip()
+
+
 def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
     """Baberu 판독을 비전 모델로 다시 읽어 헛읽기를 거른다. 대상은 두 가지다.
 
@@ -183,7 +233,8 @@ def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
         if score >= oc.cross_check_min and not low:
             continue                                 # 확신도도 괜찮고 비전과도 맞는다
         conf = f"{r.ocr_conf:.2f}" if r.ocr_conf is not None else "-"
-        if oc.vision_adopt and len(_norm(seen)) >= oc.vision_adopt_min_chars:
+        if (oc.vision_adopt and len(_norm(seen)) >= oc.vision_adopt_min_chars
+                and _vision_stable(client, cfg, image, r, seen, page)):
             # 'vision:sfx' 는 번역 단계가 효과음 확정 근거로 보는 표시라 덮어쓰지 않는다
             # (비전 분류가 효과음이라 했지만 믿지 않고 대사로 둔 영역. 긴 나레이션이 흔히 여기 든다)
             if r.notes != "vision:sfx":

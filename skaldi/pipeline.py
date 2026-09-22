@@ -21,7 +21,7 @@ from .export import export_result
 from .frontmatter import find as find_frontmatter
 from .glossary import glossary_paths, load_glossary
 from .llm import make_client
-from .ocr import cross_check, crop_region, make_ocr
+from .ocr import cross_check, crop_region, dots_over_strokes, make_ocr
 from .order import classify_styles, order_and_classify, pixel_style_check
 from .page import Page, Region
 from .progress import emit
@@ -229,6 +229,7 @@ class Pipeline:
                 r.erase = "white" if r.render else "none"
         t3 = time.time()
 
+        dots_over_strokes(image, page)       # 점으로 잘못 읽은 손글씨 효과음은 원본을 둔다
         merge_unquoted(page)                 # 색으로 나눴지만 한 문장이었던 조각은 다시 합친다
         emit("stage", name="번역")
         translate_page(self.cfg, self.client, page, glossary)

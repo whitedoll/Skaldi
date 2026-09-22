@@ -271,6 +271,23 @@ def _see_through(crop: np.ndarray, glyph: np.ndarray, bg: np.ndarray, limit: flo
     return float((v < np.median(v) - 30).mean()) > limit
 
 
+def _ellipse_floor(body: list[int], bubble: list[int] | None, keep: float = 0.6) -> list[int]:
+    """본체가 말풍선에 내접하는 사각형보다 훨씬 작으면 그 사각형을 쓴다.
+
+    본체는 말풍선 안쪽을 flood fill 해서 재는데, 안쪽에 망점·그림 선이 비치면 채우기가 막혀 본체가 작게
+    잡히고 번역문이 그만큼 작아진다(Kamaboko 異世界 05쪽: 257x348 말풍선의 본체가 157x63 띠로 잡혀 18px).
+    말풍선 상자에 내접하는 타원의 안쪽 사각형(가로·세로 0.72 배)은 둥근 말풍선이면 늘 말풍선 안이다.
+    본체가 그 넓이의 keep 배도 안 되면 믿지 않는다."""
+    if not bubble:
+        return body
+    bw, bh = bubble[2] - bubble[0], bubble[3] - bubble[1]
+    ew, eh = 0.72 * bw, 0.72 * bh
+    if (body[2] - body[0]) * (body[3] - body[1]) >= keep * ew * eh:
+        return body
+    cx, cy = (bubble[0] + bubble[2]) / 2, (bubble[1] + bubble[3]) / 2
+    return [int(cx - ew / 2), int(cy - eh / 2), int(cx + ew / 2), int(cy + eh / 2)]
+
+
 def _center_on_text(body: list[int], text: list[int], bubble: list[int] | None,
                     tol: float = 0.08) -> list[int]:
     """본체 상자가 원문 글자 중심에서 크게 어긋나면 원문 중심을 기준으로 대칭이 되게 줄인다.
@@ -288,12 +305,16 @@ def _center_on_text(body: list[int], text: list[int], bubble: list[int] | None,
     cx, cy = (text[0] + text[2]) / 2, (text[1] + text[3]) / 2
     if not (x1 < cx < x2 and y1 < cy < y2):
         return [x1, y1, x2, y2]
+    # 대칭으로 줄이되 원문 글자 상자보다 작게는 줄이지 않는다. 원문이 있던 자리는 확실히 말풍선 안이다.
+    # 본체가 한쪽만 잡힌 경우(망점에 막혀 아래 절반만)에 짧은 쪽에 맞추면 178px 이 63px 띠가 됐다(05쪽)
+    lo_x, hi_x = (bubble[0], bubble[2]) if bubble else (x1, x2)
+    lo_y, hi_y = (bubble[1], bubble[3]) if bubble else (y1, y2)
     if abs((x1 + x2) / 2 - cx) > tol * (x2 - x1):
-        half = min(cx - x1, x2 - cx)
-        x1, x2 = int(round(cx - half)), int(round(cx + half))
+        half = max(min(cx - x1, x2 - cx), (text[2] - text[0]) / 2)
+        x1, x2 = int(round(max(lo_x, cx - half))), int(round(min(hi_x, cx + half)))
     if abs((y1 + y2) / 2 - cy) > tol * (y2 - y1):
-        half = min(cy - y1, y2 - cy)
-        y1, y2 = int(round(cy - half)), int(round(cy + half))
+        half = max(min(cy - y1, y2 - cy), (text[3] - text[1]) / 2)
+        y1, y2 = int(round(max(lo_y, cy - half))), int(round(min(hi_y, cy + half)))
     return [x1, y1, x2, y2]
 
 
@@ -841,7 +862,8 @@ class Eraser:
         ov = max(0, min(bx2, body[2]) - max(bx1, body[0])) * max(0, min(by2, body[3]) - max(by1, body[1]))
         if ov < 0.5 * box_area:
             return None
-        r.body_box = _center_on_text(_blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit),
+        r.body_box = _center_on_text(_ellipse_floor(_blend(inner_rect(interior, body), body,
+                                                           self.cfg.render.bubble_fit), r.bubble_box),
                                      r.box, r.bubble_box)
         return body
 

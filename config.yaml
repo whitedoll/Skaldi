@@ -27,6 +27,8 @@ ocr:
   min_confidence: 0.8
   vision_adopt: true            # 헛읽기로 보이면 비전 모델 판독으로 바꿔 번역한다 (false 면 예전처럼 원본 유지)
   vision_adopt_min_chars: 3     # 비전 판독이 이보다 짧으면 채택하지 않는다
+  vision_consistency: 0.8       # 비전 판독을 여백을 달리해 두 번 읽어 이만큼 맞아야 채택. 손글씨 효과음에서
+                                # 비전 모델이 지어내는 문장('おはようございます')은 매번 달라진다
 
 llm:
   backend: ollama               # ollama | gemini (gemini는 번역 전용)
