@@ -16,11 +16,11 @@ from PIL import Image
 
 from .columns import dominant_colors, find_columns, glyph_size, ink_glyph_mask, is_vertical_block
 from .config import Config
-from .layout import bubble_for, bubble_masks
+from .layout import bubble_for, bubble_masks, limit_to_text, text_mask
 from .order import _SOLID_MARKS, pixel_style_check
 from .page import Page, Region
 from .skew import line_count, rotated_body, rotated_extent, text_angle
-from .textfit import fit_polygon, fit_text, fit_vertical, natural_width
+from .textfit import fit_polygon, fit_text, fit_vertical, natural_width, source_font_size
 
 
 def _clip(box: list[int], w: int, h: int, pad: int) -> tuple[int, int, int, int]:
@@ -372,8 +372,16 @@ def _bubble_region(lum: np.ndarray, bg_lum: float, glyph: np.ndarray, diff: int,
     return cv2.erode(region, np.ones((3, 3), np.uint8))   # 테두리 선 자체는 건드리지 않게 1px 안쪽
 
 
+def _halo_px(r: Region) -> int:
+    """흰 외곽선 두께 어림: 원문 글자 크기의 0.2 배(4~16px)."""
+    w, h = r.box[2] - r.box[0], r.box[3] - r.box[1]
+    char = source_font_size(r.text_ja, w, h) or min(w, h)
+    return int(np.clip(0.2 * char, 4, 16))
+
+
 def erase_bubble_text(img: np.ndarray, r: Region, pad: int, mask_out: np.ndarray | None = None,
-                      lama_mask: np.ndarray | None = None) -> None:
+                      lama_mask: np.ndarray | None = None, tmask: np.ndarray | None = None,
+                      bmask: np.ndarray | None = None) -> None:
     """img(RGB, 제자리 수정)에서 r.box 안의 글자만 지운다. r.text_color 를 정한다.
     크롭은 말풍선 박스(bubble_box)와 글자 상자를 합친 영역이다."""
     h, w = img.shape[:2]
@@ -388,9 +396,35 @@ def erase_bubble_text(img: np.ndarray, r: Region, pad: int, mask_out: np.ndarray
         return
     tbox = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
     restored: list = []
-    glyph, bg, _, mixed = glyph_mask(crop, tbox, restored_out=restored)
+    glyph, bg, bg_lum, mixed = glyph_mask(crop, tbox, restored_out=restored)
+    flat = not mixed                              # 색 판정이 평평한 바탕으로 본 말풍선
     if not mixed and _see_through(crop, glyph, bg):
         mixed = True
+    if tmask is not None:
+        halo = _halo_px(r)
+        # 지울 픽셀을 모델 글자 근처로 줄이는 건 색 판정이 평평한 바탕으로 본 말풍선에서만 한다. 거기서는
+        # 비치는 그림 선·그물 무늬를 살린다(test04 23쪽, Toropucchi 42쪽). 빗금·회색 바탕(LaMa 로 메우는 곳)
+        # 에서 줄이면 LaMa 가 남은 빗금 사이를 얼룩으로 메웠다(Toropucchi 04쪽). 모델 글자 근처의 놓친 획을
+        # 보충하는 건 늘 하되, 평평한 말풍선이면 말풍선 안쪽(글자+바탕)에서만 한다
+        # 색 판정이 놓쳐 되살린 조각도 안쪽으로 친다. 안 그러면 바로 그 조각(가시 테두리 가장자리 열)이 보충에서
+        # 빠져 test05 055쪽 'ま、' '気持ちよすぎる！' 가 다시 남았다
+        extra_in = restored[0] if restored and restored[0].any() else np.zeros_like(glyph)
+        base = cv2.bitwise_or(glyph, extra_in)
+        region = (cv2.dilate(cv2.bitwise_or(base, bg), cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * halo + 1, 2 * halo + 1))) if flat else None)
+        # 분할 모델이 이 글의 말풍선을 잡았으면 그 윤곽이 더 믿을 만한 경계다. 검은 말풍선은 색 채우기가
+        # 이어진 어두운 머리카락으로 새어, 보충이 말풍선 밖을 검게 칠했다(Tsusauto 106쪽)
+        if bmask is not None:
+            seg = cv2.dilate(bmask[y1:y2, x1:x2], np.ones((5, 5), np.uint8))
+            region = seg if region is None else cv2.bitwise_and(region, seg)
+        cut = limit_to_text(base, tmask[y1:y2, x1:x2], tbox, halo, _lum(crop), bg_lum,
+                            restrict=flat, region=region)
+        if cut is not None:
+            dropped = cv2.bitwise_and(glyph, cv2.bitwise_not(cut))
+            glyph = cut
+            bg = cv2.bitwise_and(cv2.bitwise_or(bg, dropped), cv2.bitwise_not(glyph))
+            if restored and restored[0].any():
+                restored[0] = cv2.bitwise_and(restored[0], cut)
     if restored and restored[0].any():
         glyph = cv2.bitwise_or(glyph, restored[0])
         # 되살린 조각이 있다 = 바탕이 평평하지 않은 말풍선이다(가시 테두리·그라데이션). 이 글자 전체를
@@ -711,6 +745,8 @@ class Eraser:
         orig_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         pixel_style_check(orig_gray, page)        # 획이 고른 글자는 모델 판정과 달라도 인쇄체로
         col_colors: dict[int, tuple] = {}          # id(r) → 열로 잰 (채움 색, 둘레 색)
+        tmask = text_mask(page.layout, (h, w)) if self.cfg.layout.erase else None
+        seg_bubbles = bubble_masks(page.layout, (h, w)) if tmask is not None else []
         for r in page.regions:
             r.angle, r.rot_box = 0.0, None
             r.writing = _label_writing(r, self.cfg)
@@ -755,11 +791,19 @@ class Eraser:
                 pass                                # 흰 외곽선은 두고 글자만 지웠다
             elif r.erase == "white":
                 erase_bubble_text(img, r, e.bubble_padding,
-                                  lama_mask=lama_mask if e.lama else None)
+                                  lama_mask=lama_mask if e.lama else None, tmask=tmask,
+                                  bmask=bubble_for(r.box, seg_bubbles) if tmask is not None else None)
             elif r.erase == "lama":
                 x1, y1, x2, y2 = _clip(r.box, w, h, e.lama_dilate)
-                lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2],
-                                                     _art_text_mask(orig_gray, r.box, e.lama_dilate, (x1, y1, x2, y2)))
+                art = _art_text_mask(orig_gray, r.box, e.lama_dilate, (x1, y1, x2, y2))
+                if tmask is not None:
+                    tb = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
+                    g = orig_gray[y1:y2, x1:x2].astype(np.float32)
+                    ring = np.ones(g.shape, bool); ring[3:-3, 3:-3] = False
+                    cut = limit_to_text(art, tmask[y1:y2, x1:x2], tb, _halo_px(r) + e.lama_dilate,
+                                        g, float(np.median(g[ring])) if ring.any() else None)
+                    art = cut if cut is not None else art
+                lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2], art)
 
         page_weight_check(page, self.cfg.render.bold_stroke_ratio)
 

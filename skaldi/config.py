@@ -110,6 +110,7 @@ class LayoutCfg(BaseModel):
     enabled: bool = True                # 장당 약 2.4초(번역 모델과 같은 GPU 에서)
     sfx: bool = True                    # 효과음으로 분할된 글자는 번역해 그리지 않고 원본을 둔다
     body: bool = False                  # 말풍선 본체를 모델 윤곽으로도 재어 넓은 쪽을 쓴다(효과는 거의 중립)
+    erase: bool = True                  # 지울 픽셀을 모델 글자 근처로 줄인다(비치는 그림 선·손을 안 지운다)
     repo: str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152"
     bubble_threshold: float = 0.5       # 모델 카드 권장값
     text_threshold: float = 0.25

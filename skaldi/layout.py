@@ -160,3 +160,72 @@ def mark_sfx(page, items: list[dict] | None, shape: tuple[int, int], min_cover: 
             r.notes = (r.notes + f" {SFX_NOTE}({sc:.2f}/{tc:.2f})").strip()
             n += 1
     return n
+
+
+
+def text_mask(items: list[dict] | None, shape: tuple[int, int]) -> np.ndarray | None:
+    """글자·효과음 마스크를 합친 페이지 크기 마스크(0/255). 없으면 None."""
+    if not items:
+        return None
+    m = np.zeros(shape, np.uint8)
+    for it in items:
+        if it["cls"] in ("text", "onomatopoeia"):
+            m |= rasterize(it, shape)
+    return m if m.any() else None
+
+
+def limit_to_text(mask: np.ndarray, tmask: np.ndarray, tbox: tuple[int, int, int, int], halo: int,
+                  lum: np.ndarray | None = None, bg_lum: float | None = None, restrict: bool = True,
+                  region: np.ndarray | None = None) -> np.ndarray | None:
+    """지우기 마스크를 분할 모델 글자 근처로 줄이고, 모델 글자 자체는 꼭 넣는다. 모델이 이 글을 못 잡았으면 None.
+
+    색으로 만든 지우기 마스크는 흰 외곽선까지 잡으려고 바탕과 조금만 달라도 넣어, 말풍선 안에 비치는 그림 선·
+    집중선까지 지웠다(test04 23쪽·Kamaboko 03쪽 반투명 말풍선의 흰 조각). 모델 글자 마스크는 글자 채움에
+    딱 맞고 외곽선은 빠지므로 셋을 남긴다.
+    - 모델 글자에서 halo 안: 마스크 그대로
+    - 3×halo 안: 바탕보다 밝은 것(흰 외곽선)만. 거리로만 자르면 두꺼운 흰 외곽선이 글자 모양 흰 윤곽으로
+      남고, LaMa 는 그 흰 테두리를 보고 글자 자리를 흰색으로 메웠다(test04 '舌が勝手に')
+    - 모델 글자 halo 안의 짙은 픽셀(색 마스크가 놓친 획)
+    - 모델이 못 잡은 작은 글자·기호(후리가나 'わらわ', ♥): 글자 상자 안의 짙은 조각 중 글자 한 칸 남짓 이하
+    restrict=False 면 줄이지 않고 보충만 한다(마스크 ∪ 위의 둘째·셋째 것). region 을 주면 보충은 그 안에서만
+    한다(말풍선 안쪽 — 테두리 가까운 글자의 halo 가 말풍선 밖 그림까지 넘지 않게).
+    mask·tmask·lum 은 같은 크롭 크기, tbox 는 크롭 좌표의 글자 상자."""
+    x1, y1, x2, y2 = (max(0, v) for v in tbox)
+    got = int((tmask[y1:y2, x1:x2] > 0).sum())
+    had = int((mask[y1:y2, x1:x2] > 0).sum())
+    if got < 30 or got < 0.1 * had:
+        return None
+    el = lambda k: cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1, 2 * k + 1))  # noqa: E731
+    near = cv2.dilate(tmask, el(halo))
+    keep = cv2.bitwise_and(mask, near)
+    extra = np.zeros_like(mask)
+    if lum is not None and bg_lum is not None:
+        if bg_lum >= 128:
+            # 흰 외곽선은 밝은 바탕에서만 따진다. 검은 말풍선에서는 모든 픽셀이 '바탕보다 밝아' 말풍선 밖
+            # 머리카락까지 지워 검게 칠했다(Tsusauto 106쪽)
+            far = cv2.dilate(tmask, el(3 * halo))
+            light = ((lum >= bg_lum + 8) | (lum >= 250)).astype(np.uint8) * 255
+            keep = cv2.bitwise_or(keep, cv2.bitwise_and(cv2.bitwise_and(mask, far), light))
+        dark = (np.abs(lum - bg_lum) > 40).astype(np.uint8)
+        # 모델 글자 근처의 짙은 픽셀은 색 마스크에 없어도 지운다. 색 마스크가 글자를 통째로 놓친 곳이 있고
+        # (Tsusauto 106쪽 'あっ'), 모델 마스크는 획 끝을 조금 놓친다
+        extra = cv2.bitwise_and(dark * 255, near)
+        char = halo / 0.2
+        n, lab, st, _ = cv2.connectedComponentsWithStats(dark, connectivity=8)
+        small = np.zeros_like(mask)
+        for i in range(1, n):
+            bx, by, bw, bh, area = (int(v) for v in st[i])
+            # 후리가나·하트처럼 모델이 글자로 안 본 기호: 글자 상자 안, 글자 한 칸 남짓 이하
+            if (area >= 6 and bx >= x1 and by >= y1 and bx + bw <= x2 and by + bh <= y2
+                    and max(bw, bh) <= 1.2 * char and area >= 0.1 * bw * bh
+                    and not (tmask[lab == i] > 0).any()):
+                small[lab == i] = 255
+        if small.any():
+            keep = cv2.bitwise_or(keep, cv2.bitwise_and(mask, cv2.dilate(small, el(max(2, halo // 2)))))
+    core = cv2.dilate(tmask, el(2))
+    lim = np.zeros_like(mask)
+    lim[max(0, y1 - halo):y2 + halo, max(0, x1 - halo):x2 + halo] = 255
+    extra = cv2.bitwise_and(cv2.bitwise_or(extra, core), lim)
+    if region is not None:
+        extra = cv2.bitwise_and(extra, region)
+    return cv2.bitwise_or(keep if restrict else mask, extra)
