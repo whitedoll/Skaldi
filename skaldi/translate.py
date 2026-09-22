@@ -8,7 +8,7 @@ from .glossary import glossary_prompt
 from .llm import looks_refused
 from .normalize import leftover_cjk, normalize_ko
 from .ocr import OCR_MISMATCH
-from .order import sfx_allowed_in_bubble, sibling_sfx
+from .order import filler_allowed, sfx_allowed_in_bubble, sibling_sfx
 from .page import Page, Region
 
 _SCHEMA = {
@@ -21,7 +21,7 @@ _SCHEMA = {
                 "properties": {
                     "id": {"type": "integer"},
                     "ko": {"type": "string"},
-                    "note": {"type": "string", "enum": ["ok", "sfx", "unclear"]},
+                    "note": {"type": "string", "enum": ["ok", "sfx", "filler", "unclear"]},
                 },
                 "required": ["id", "ko", "note"],
             },
@@ -50,7 +50,11 @@ def _system(cfg: Config, glossary: dict) -> str:
         "한자는 쓰지 말고 병기도 하지 말라 (무모(無毛) ✕ / 무모 ○). 식자 글꼴에 한자가 없다. "
         "ko 필드에는 번역문만 넣고 번호·괄호·종류 표시 같은 것을 붙이지 말라. "
         "note 필드: 보통 대사면 ok. 사물·동작 소리를 흉내낸 효과음(ドン, ゴキュッ, ボボボ)만 sfx(ko에는 음역). "
-        "감탄사·대답·신음·웃음(へぇ, そう, ああっ, クスクス)은 대사이므로 ok. "
+        "대답·질문·감탄·웃음처럼 뜻을 전하는 말(はい, そう, へぇ, え？, クスクス, ふふ)은 ok. "
+        "filler: 뜻 있는 낱말 없이 모음·ん·は행 소리만 늘인 발성으로, 번역해도 음역밖에 안 되고 "
+        "빼도 장면 이해에 지장이 없는 것. 신음·교성·헐떡임·감탄 비명(おおお, ほおお, おおっ, んほっ♥, あっ♡, "
+        "あっあっ, はぁはぁ, ふぅ…, はひ…, うおお…)은 filler 다. 이런 발성을 ok 로 두지 말라. "
+        "다만 같은 あっ 이라도 무언가를 알아차리거나 부르거나 놀라 반응하는 것이 문맥상 분명하면 ok. "
         "원문이 OCR 오류나 잘림으로 뜻을 알 수 없으면 unclear(ko에는 최선의 추정). "
         "각 항목을 같은 id로 돌려주고 JSON으로만 답하라."
     )
@@ -118,6 +122,11 @@ def translate_page(cfg: Config, client, page: Page, glossary: dict) -> None:
                 vision_sfx or r.kind == "free_text" or hand_drawn
             ):
                 r.category = "sfx"                    # 비전·번역 모델이 모두 소리 표현이라고 본 경우만 원본 유지
+                r.render, r.erase = False, "none"
+            elif note in ("filler", "sfx") and r.category in ("dialogue", "narration", "unknown") and filler_allowed(r.text_ja):
+                # 번역 모델이 문맥상 뜻 없는 발성이라 보고, 원문도 발성 글자로만 된 경우만 원본 유지.
+                # 모델은 신음(んほっ ほおおおおッ)을 filler 대신 sfx 라고 답하는 일이 많아 둘 다 받는다.
+                r.category = "filler"
                 r.render, r.erase = False, "none"
             elif note == "unclear":
                 r.needs_review = True                 # 원문 불명확: 원본 유지, JSON에서 검토

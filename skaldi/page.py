@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Kind = Literal["bubble_text", "free_text"]
-Category = Literal["dialogue", "narration", "label", "sfx", "unknown"]
+Category = Literal["dialogue", "narration", "label", "sfx", "filler", "unknown"]
 EraseMode = Literal["white", "lama", "none"]
 
 
@@ -20,7 +20,7 @@ class Region(BaseModel):
     score: float = 0.0
     text_ja: str = ""
     text_ko: str = ""
-    category: Category = "unknown"            # dialogue/narration은 그림, label은 JSON만, sfx는 무시
+    category: Category = "unknown"            # dialogue/narration은 그림, label은 JSON만, sfx·filler(뜻 없는 신음)는 무시
     order: int | None = None                  # 읽기 순서 (0부터)
     render: bool = True                       # 이미지에 그릴지
     erase: EraseMode = "white"

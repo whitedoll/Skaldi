@@ -41,7 +41,7 @@ def set_out(path: str) -> Path:
     OUT = Path(path.strip().strip(chr(34))).expanduser() if path.strip() else DEFAULT_OUT
     return OUT
 COLS = ["id", "order", "category", "render", "text_ja", "text_ko", "needs_review", "style", "weight", "notes"]
-CATEGORIES = ["dialogue", "narration", "label", "sfx", "unknown"]
+CATEGORIES = ["dialogue", "narration", "label", "sfx", "filler", "unknown"]
 UPLOADS = CFG.abs(Path("input"))
 IMAGE_SUFFIXES = {".webp", ".jpg", ".jpeg", ".png", ".bmp"}
 
