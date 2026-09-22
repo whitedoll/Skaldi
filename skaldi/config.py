@@ -105,6 +105,15 @@ class RenderCfg(BaseModel):
     supersample_below: int = 35         # 이 크기(px) 미만 글자는 크게 그려 줄여서 계단 현상을 줄임
 
 
+class LayoutCfg(BaseModel):
+    """말풍선·글자·효과음 분할 모델(koharu-layout-rfdetr-seg). 판정 근거는 layout.py 참고."""
+    enabled: bool = False               # 켜면 장당 약 2.4초(번역 모델과 같은 GPU 에서). 지금은 말풍선 본체 측정에만 쓴다
+    repo: str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152"
+    bubble_threshold: float = 0.5       # 모델 카드 권장값
+    text_threshold: float = 0.25
+    sfx_threshold: float = 0.2
+
+
 class FrontMatterCfg(BaseModel):
     """표지·속표지 같은 앞장을 번역에서 뺀다. 판정 근거는 frontmatter.py 참고."""
     skip: bool = True
@@ -149,6 +158,7 @@ class Config(BaseModel):
     erase: EraseCfg = EraseCfg()
     render: RenderCfg = RenderCfg()
     frontmatter: FrontMatterCfg = FrontMatterCfg()
+    layout: LayoutCfg = LayoutCfg()
     anytext: AnyTextCfg = AnyTextCfg()
     qwen: QwenCfg = QwenCfg()
 

@@ -16,6 +16,7 @@ from PIL import Image
 
 from .columns import dominant_colors, find_columns, glyph_size, ink_glyph_mask, is_vertical_block
 from .config import Config
+from .layout import bubble_for, bubble_masks
 from .order import _SOLID_MARKS, pixel_style_check
 from .page import Page, Region
 from .skew import line_count, rotated_body, rotated_extent, text_angle
@@ -779,12 +780,18 @@ class Eraser:
         # (탐지기가 준 bubble_box 는 꼬리·뿔까지 감싸서 중심이 본체와 어긋난다).
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         tilted: dict[int, tuple[float, float, float, float]] = {}     # id(r) → 세운 말풍선 상자
+        bubbles = bubble_masks(page.layout, (h, w))
         for r in page.regions:
             if not (r.render and r.erase == "white" and r.kind == "bubble_text"):
                 continue
             try:
+                # 분할 모델이 잡은 말풍선이 있으면 그 윤곽을 쓴다. 색으로 채워 나가면 망점·반투명·빗금에서
+                # 막히거나 샌다. 모델 마스크는 테두리 선까지 덮으므로 조금 깎아 안쪽만 남긴다
                 interior = bubble_interior(gray, r, e.flood_tolerance)
                 body = self._measure_body(r, interior)
+                seg = bubble_for(r.box, bubbles)
+                if seg is not None:
+                    interior, body = self._pick_body(r, interior, body, seg)
                 if body and e.widen_bubbles and r.text_ko.strip():
                     self._widen(img, gray, r, page, interior, body)
                 if r.angle and interior is not None and r.body_box and not r.widened:
@@ -841,7 +848,39 @@ class Eraser:
                 continue
             r.rot_box = [round(v, 1) for v in fit]
 
-    def _measure_body(self, r: Region, interior: np.ndarray | None) -> tuple[int, int, int, int] | None:
+    def _pick_body(self, r: Region, flood: np.ndarray | None, flood_body, seg: np.ndarray):
+        """색 채우기로 잰 본체와 분할 모델 윤곽으로 잰 본체 중 넓은 쪽을 쓴다. (고른 안쪽 마스크, 본체)
+
+        모델은 망점·반투명·빗금에 막히지 않아, 색 채우기가 막혀 작게 잡힌 말풍선에서 넓은 자리를 준다
+        (작품 6종 표본 283개 중 10개가 15% 넘게 커졌고 대부분 나아짐: Kamaboko 09쪽 'イク…ッ' 22 → 32px).
+        반대로 모델 마스크는 말풍선 안쪽에 딱 붙어, 모델 쪽이 더 좁을 때 그것을 쓰면 글자만 작아졌다
+        (12개가 13% 넘게 작아졌고 대부분 나빠짐: 33쪽 'さて…' 32 → 21px). 그래서 모델은 넓힐 때만 쓴다.
+        색 채우기가 새서 커지는 경우는 _center_on_text 가 말풍선 상자 안으로 자른다."""
+        flood_box = r.body_box
+        k = max(2, int(min(r.box[2] - r.box[0], r.box[3] - r.box[1]) * 0.03))
+        seg_in = cv2.erode(seg, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        seg_body = self._measure_body(r, seg_in, trusted=True)
+        seg_box = r.body_box
+        # 붙은 말풍선을 한 마스크로 잡으면 본체가 옆 말풍선까지 뻗는다(Sevengar 139쪽: 글이 왼쪽 말풍선으로
+        # 넘어가 앞부분이 잘림). 탐지기가 이 글에 붙여 준 말풍선 상자 안으로 자른다
+        if seg_box is not None and r.bubble_box:
+            bb = r.bubble_box
+            seg_box = [max(seg_box[0], bb[0]), max(seg_box[1], bb[1]), min(seg_box[2], bb[2]), min(seg_box[3], bb[3])]
+            if seg_box[2] - seg_box[0] < 10 or seg_box[3] - seg_box[1] < 10:
+                seg_box = None
+            r.body_box = seg_box
+        area = lambda b: (b[2] - b[0]) * (b[3] - b[1]) if b else 0  # noqa: E731
+        # 붙어 있는 두 말풍선을 모델이 한 마스크로 잡으면 안쪽 사각형이 옆 말풍선에 잡힌다(Toropucchi 28쪽:
+        # 'よぉ〜っし' 가 옆 말풍선으로 넘어가 그려짐). 원문 글자 상자 중심을 품지 않으면 쓰지 않는다
+        cx, cy = (r.box[0] + r.box[2]) / 2, (r.box[1] + r.box[3]) / 2
+        holds = seg_box is not None and seg_box[0] <= cx <= seg_box[2] and seg_box[1] <= cy <= seg_box[3]
+        if holds and area(seg_box) > area(flood_box):
+            return seg_in, seg_body
+        r.body_box = flood_box
+        return flood, flood_body
+
+    def _measure_body(self, r: Region, interior: np.ndarray | None, trusted: bool = False
+                      ) -> tuple[int, int, int, int] | None:
         """말풍선 내부 마스크에서 본체 사각형을 재어 r.body_box 에 넣는다.
 
         flood fill 이 글자 획 안에 갇히거나(아주 작은 마스크) 말풍선 밖으로 크게 새면 믿을 수 없으므로
@@ -862,9 +901,14 @@ class Eraser:
         ov = max(0, min(bx2, body[2]) - max(bx1, body[0])) * max(0, min(by2, body[3]) - max(by1, body[1]))
         if ov < 0.5 * box_area:
             return None
-        r.body_box = _center_on_text(_ellipse_floor(_blend(inner_rect(interior, body), body,
-                                                           self.cfg.render.bubble_fit), r.bubble_box),
-                                     r.box, r.bubble_box)
+        inner = _blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit)
+        if trusted:
+            # 분할 모델 윤곽은 믿는다. 작게 잡혔을 때의 보정(_ellipse_floor)도, 새어 커졌을 때의 가운데
+            # 맞춤(_center_on_text)도 하지 않는다 — 가운데 맞춤은 본체가 원문 중심에서 조금만 어긋나도
+            # 원문 글자 상자 크기로 좁혀, 글이 말풍선 한쪽에 치우친 세로쓰기 말풍선에서 글자가 작아졌다
+            r.body_box = inner
+        else:
+            r.body_box = _center_on_text(_ellipse_floor(inner, r.bubble_box), r.box, r.bubble_box)
         return body
 
     def _widen(self, img: np.ndarray, gray: np.ndarray, r: Region, page: Page,

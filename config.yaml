@@ -51,6 +51,14 @@ translate:
   source_lang: 일본어
   target_lang: 한국어
 
+layout:                         # 말풍선·글자·효과음 분할 모델. 말풍선 윤곽으로 글자 자리를 잰다
+  enabled: false                # true 면 색 채우기와 모델 윤곽으로 잰 말풍선 본체 중 넓은 쪽을 쓴다.
+                                # 작품 6종 표본 283개에서 약 97% 는 같고 나아짐·나빠짐이 비슷해 기본은 끈다
+  repo: mayocream/koharu-layout-rfdetr-seg-2xl-1152   # Manga109 학습(학술·비상업). 처음 쓸 때 models/ 로 받는다
+  bubble_threshold: 0.5
+  text_threshold: 0.25
+  sfx_threshold: 0.2
+
 frontmatter:                    # 표지·속표지 같은 앞장은 번역하지 않고 원본을 둔다
   skip: true
   analyze: true                 # 앞장도 OCR·번역해 JSON 에 남긴다(그리지는 않음). 표지 제목을

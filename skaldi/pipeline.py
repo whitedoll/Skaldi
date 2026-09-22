@@ -77,6 +77,7 @@ class Pipeline:
         self._ocr = None
         self._client = None
         self._eraser = None
+        self._layout = None
         self._renderers: dict[str, object] = {}
         self._cover: Path | None = None       # zip 의 첫 이미지(표지). 라벨을 그리지 않는다
 
@@ -106,6 +107,33 @@ class Pipeline:
         if self._eraser is None:
             self._eraser = Eraser(self.cfg)
         return self._eraser
+
+    @property
+    def layout_model(self):
+        if self._layout is None:
+            from .layout import KoharuLayout
+            console.print("[dim]말풍선 분할 모델 로드 중...[/dim]")
+            self._layout = KoharuLayout(self.cfg)
+        return self._layout
+
+    def layout_items(self, src: Path, image: Image.Image, force: bool = False) -> list | None:
+        """분할 결과. layout/<이름>.json 에 있으면 그것을, 없으면 모델을 돌려 저장한다. 꺼져 있거나 실패하면 None."""
+        if not self.cfg.layout.enabled:
+            return None
+        from . import layout as L
+        path = self.out / "layout" / f"{src.stem}.json"
+        if not force:
+            items = L.load(path)
+            if items is not None:
+                return items
+        try:
+            emit("stage", name="말풍선 분할")
+            items = self.layout_model.predict(image)
+        except Exception as e:  # noqa: BLE001 - 모델이 없거나 실패하면 예전 방식으로 그린다
+            console.print(f"  [yellow]말풍선 분할 실패, 색으로 추정합니다: {e}[/yellow]")
+            return None
+        L.save(path, items)
+        return items
 
     def renderer(self, name: str):
         if name not in self._renderers:
@@ -241,6 +269,7 @@ class Pipeline:
 
     def render(self, src: Path, page: Page, renderers: list[str], force: bool = False) -> dict[str, Path]:
         image = Image.open(src).convert("RGB")
+        page.layout = self.layout_items(src, image)
         cpath = self.clean_path(src)
         if cpath.exists() and not force:
             clean = Image.open(cpath).convert("RGB")

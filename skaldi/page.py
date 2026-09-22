@@ -66,6 +66,7 @@ class Page(BaseModel):
     regions: list[Region] = Field(default_factory=list)
     models: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    layout: list | None = Field(default=None, exclude=True)   # 분할 모델 결과(layout/<이름>.json 에 따로 둔다)
 
     def ordered(self) -> list[Region]:
         """읽기 순서대로 정렬. 순서가 없으면 id 순."""
