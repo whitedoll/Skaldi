@@ -14,11 +14,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .columns import dominant_colors, find_columns, glyph_size, ink_glyph_mask, is_vertical_block
 from .config import Config
+from .layout import bubble_for, bubble_masks, limit_to_text, text_mask
 from .order import _SOLID_MARKS, pixel_style_check
 from .page import Page, Region
 from .skew import line_count, rotated_body, rotated_extent, text_angle
-from .textfit import fit_polygon, fit_text, fit_vertical, natural_width
+from .textfit import fit_polygon, fit_text, fit_vertical, natural_width, source_font_size
 
 
 def _clip(box: list[int], w: int, h: int, pad: int) -> tuple[int, int, int, int]:
@@ -30,8 +32,8 @@ def _lum(rgb: np.ndarray) -> np.ndarray:
     return (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]).astype(np.float32)
 
 
-def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
-               ) -> tuple[np.ndarray, np.ndarray, float, bool]:
+def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40,
+               restored_out: list | None = None) -> tuple[np.ndarray, np.ndarray, float, bool]:
     """크롭(말풍선 전체) 안에서 글자 상자 tbox(크롭 좌표) 의 글자 획 마스크를 구한다.
     1) 배경 밝기 = 글자 상자 바로 바깥 띠(말풍선 안쪽)의 중앙값.
     2) 배경과 diff 이상 다른 픽셀(검은 획, 흰 외곽선)이 글자 후보. 주변의 옅은 잔상도 포함.
@@ -66,6 +68,13 @@ def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
     glyph = cv2.dilate(strict, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
     near = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)))
     loose = ((np.abs(lum - bg_lum) > 12).astype(np.uint8) * 255) & near
+    # 반투명 말풍선(바탕이 옅은 회색)에서 글자에 두른 순백 외곽선은 바탕과 차이가 12 안팎이라 위 기준에
+    # 걸리지 않아, 글자 모양의 흰 잔상으로 남았다(test04 23쪽 'な…ッ！？': 바탕 243, 외곽선 255).
+    # 글자 바로 둘레에서 바탕보다 뚜렷이 밝은(순백에 가까운) 픽셀도 외곽선으로 본다
+    if bg_lum < 248:
+        halo_near = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17)))
+        whiter = (lum >= max(bg_lum + 6, 248)).astype(np.uint8) * 255
+        loose = cv2.bitwise_or(loose, whiter & halo_near)
     glyph = cv2.bitwise_or(glyph, loose)
 
     # 글자 상자(+여백) 안만 지운다. 같은 말풍선의 다른 글자(효과음 등)는 건드리지 않는다.
@@ -82,8 +91,25 @@ def glyph_mask(crop: np.ndarray, tbox: tuple[int, int, int, int], diff: int = 40
         bg = cv2.bitwise_and(halo, cv2.bitwise_not(glyph))
     else:
         inside = _bubble_region(lum, bg_lum, glyph, min(diff, 30), tbox)
-        glyph = cv2.bitwise_and(glyph, inside)
-        bg = cv2.bitwise_and(cv2.bitwise_not(glyph), inside)
+        kept = cv2.bitwise_and(glyph, inside)
+        # 말풍선 안쪽 판정이 글자를 통째로 빼먹는 경우가 있다. 가장자리를 빗금(집중선)으로 채운 말풍선에서
+        # 흰 외곽선을 두른 글자 덩어리가 빗금을 타고 말풍선 밖까지 이어지면, 글자가 '갇힌 구멍'이 아니게
+        # 되어 안쪽에서 빠진다(Kamaboko 23쪽: 글자 픽셀의 1~2% 만 지우고 원문이 그대로 남았다).
+        # 글자 상자 안쪽 글자 픽셀이 절반 넘게 빠지면 이 판정을 버리고 배경이 섞인 말풍선처럼 다룬다.
+        core = np.zeros((h, w), bool)
+        core[max(0, ty1 + 3):max(0, ty2 - 3), max(0, tx1 + 3):max(0, tx2 - 3)] = True
+        want = int(((strict > 0) & core).sum())
+        if want >= 50 and int(((kept > 0) & (strict > 0) & core).sum()) < 0.5 * want:
+            mixed = True
+            halo = cv2.dilate(glyph, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+            bg = cv2.bitwise_and(halo, cv2.bitwise_not(glyph))
+        else:
+            # 일부 열만 빠진 경우(가시·옅어지는 테두리)는 빠진 글자 덩어리만 되살려 LaMa 몫으로 넘긴다
+            restored = _restore_dropped(kept, glyph, strict, limit, tbox)
+            if restored_out is not None:
+                restored_out.append(restored)
+            glyph = kept
+            bg = cv2.bitwise_and(cv2.bitwise_not(cv2.bitwise_or(glyph, restored)), inside)
     if not bg.any():
         bg = cv2.bitwise_not(glyph)
     return glyph, bg, bg_lum, mixed
@@ -99,6 +125,60 @@ def _label_writing(r: Region, cfg: Config) -> str:
     if not vertical or lines >= 1.6:
         return "auto"
     return "sideways" if mode == "sideways" else "vertical"
+
+
+def _free_vertical(img: np.ndarray, r: Region, cfg: Config) -> tuple[str, int | None, tuple | None]:
+    """말풍선 밖 세로 글(나레이션·대사)은 번역문도 원문 열 자리에 세로로 쓴다. (쓰기 방식, 원문 글자 크기)
+
+    예전에는 가로쓰기로 바꾸려고 상자를 옆으로 높이의 0.6 배까지 넓혔다. 페이지 높이만 한 세로 나레이션
+    (196x1266)은 폭이 760px 이 되어 번역문이 그림을 덮었다(test02 316·319쪽). 원문 자리에 세로로 쓰면
+    지운 자리 안에 들어가고, 원문 열 폭을 글자 크기로 쓰면 원문과 같은 크기가 된다.
+
+    세 번째 값은 (글자 채움 색, 둘레 색). 두꺼운 흰 외곽선을 두른 글씨는 measure_text_style 이 흰 외곽선을
+    글자 색으로 잡는다(test02: 분홍 글씨가 흰색·외곽선 없음으로 측정됐다). 열 찾기는 흰색이 아닌 조각만
+    글자로 보므로 채움 색을 바로 잰다."""
+    # 말풍선 글자로 분류됐어도 감싸는 말풍선을 못 찾았으면 그림 위 글자다. 이런 영역은 가로쓰기용으로
+    # 옆으로 넓혀져 그림을 덮었다(316쪽 오른쪽 열: 120px 열이 322px 로). 말풍선이 있으면 그 안에 갇히므로
+    # 원래대로 둔다 — 글자에 딱 붙은 네모 나레이션 상자(Hayashi 39곳)는 지금처럼 가로쓰기가 깔끔하다
+    on_art = r.kind == "free_text" or (r.kind == "bubble_text" and not r.bubble_box)
+    if not (cfg.render.free_vertical and on_art and r.render
+            and r.category in ("dialogue", "narration") and is_vertical_block(r.box)):
+        return "auto", None, None
+    x1, y1, x2, y2 = r.box
+    cols, g = find_columns(img[max(0, y1):y2, max(0, x1):x2])
+    if not cols:
+        return "auto", None, None
+    # 열이 짧으면 가로로 바꿔도 조금만 넓어지고, 가로쓰기가 더 크고 읽기 쉽다(Sevengar: 열 평균 11자,
+    # 세로로 바꾸니 글자가 작아졌다). 긴 열(test02 평균 25자)만 세로로 쓴다
+    # 글자 수는 열 폭으로 잰 글자 크기로 센다. 조각 크기(g)는 보통 검은 글씨에서 획 하나라 작게 잡혀
+    # 열이 실제보다 길게 세어진다(흰 외곽선 글씨는 조각이 글자 하나라 차이가 없다)
+    size = glyph_size(cols, g)
+    if max(c.y2 - c.y1 for c in cols) / size < cfg.render.free_vertical_min_len:
+        return "auto", None, None
+    return "vcols", size, (*dominant_colors(cols), len(cols))
+
+
+def _is_white(c) -> bool:
+    return bool(c) and 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 200
+
+
+def _fill_in_halo(img: np.ndarray, r: Region, halo) -> bool:
+    """글자마다 흰 외곽선을 두른 글씨는 외곽선은 남기고 글자 채움만 외곽선 색으로 덮는다. 했으면 True.
+
+    LaMa 로 외곽선까지 지우면 둘레의 검은 바깥선을 따라 검게 메워져, 흰 띠였던 자리가 검은 띠가 됐다
+    (test02 316쪽). 흰 띠를 남기면 원문과 같은 모양 위에 번역문을 쓸 수 있다."""
+    if not _is_white(halo):
+        return False
+    h, w = img.shape[:2]
+    pad = 24
+    x1, y1, x2, y2 = max(0, r.box[0] - pad), max(0, r.box[1] - pad), min(w, r.box[2] + pad), min(h, r.box[3] + pad)
+    inner = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
+    m = ink_glyph_mask(img[y1:y2, x1:x2], inner)
+    if not m.any():
+        return False
+    m = cv2.dilate(m.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=2) > 0
+    img[y1:y2, x1:x2][m] = halo
+    return True
 
 
 def _art_text_mask(gray: np.ndarray, box: list[int], dilate: int,
@@ -124,6 +204,134 @@ def _art_text_mask(gray: np.ndarray, box: list[int], dilate: int,
     if cover < 0.05 or cover > 0.85:
         return full
     return m
+
+
+def _restore_dropped(kept: np.ndarray, glyph: np.ndarray, strict: np.ndarray, limit: np.ndarray,
+                     tbox: tuple[int, int, int, int]) -> np.ndarray:
+    """말풍선 안쪽 판정에서 빠진 글자 덩어리를 되살린다.
+
+    안쪽 판정은 글자를 '말풍선 바탕 안에 갇힌 구멍'으로 찾는다. 가장자리가 가시·빗금으로 된 말풍선이나
+    바탕이 가장자리로 옅어지는 말풍선에서는, 가장자리에 가까운 열이 테두리 쪽으로 이어져 갇힌 구멍이
+    아니게 되고 그 열만 통째로 빠진다(test05 055쪽: 4열 중 바깥 두 열의 일부가 남았다).
+    글자 상자 안쪽에 대부분 들어 있고, 절반 넘게 빠졌고, 테두리 선처럼 길고 속이 빈 모양이 아니고,
+    크롭 가장자리에 닿지 않은 덩어리만 되살린다 — 그래야 말풍선 테두리와 그 바깥은 여전히 안 지운다.
+    되살린 조각의 마스크를 돌려준다. 이 조각은 테두리 가까이라 평평하게 메우지 말고 LaMa 로 메운다
+    (흐린 바탕색으로 메우면 가시 무늬가 네모나게 잘려 나간다). 나머지 글자는 원래대로 메운다 — 말풍선 전체를
+    LaMa 로 넘기면 흰 말풍선이 얼룩진다(Sevengar 005쪽).
+
+    크기·굵기로 글자답지 않은 것은 거르지만 완전히 가를 수는 없다(말풍선 안 그림 선이 글자 굵기면 걸린다).
+    그래도 LaMa 로 메우는 작은 조각이라, 잘못 걸려도 그 조각이 주변 무늬로 메워지는 데 그친다."""
+    h, w = strict.shape
+    tx1, ty1, tx2, ty2 = tbox
+    core = np.zeros((h, w), np.uint8)
+    core[max(0, ty1 + 3):max(0, ty2 - 3), max(0, tx1 + 3):max(0, tx2 - 3)] = 1
+    cand = _drop_line_parts(cv2.bitwise_and(strict, limit))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    # 글자 한 칸의 굵기: 제대로 잡힌 글자 덩어리들의 짧은 변을 면적 가중으로 모은 중앙값. 열이면 열 폭,
+    # 줄이면 줄 높이다. 단순 중앙값은 점·탁점 같은 작은 조각에 끌려 작아진다(test05: 62px 열이 상한을 넘었다)
+    thick = [(min(int(stats[i, 2]), int(stats[i, 3])), int(stats[i, 4])) for i in range(1, n)
+             if stats[i, 4] >= 30 and (kept[labels == i] > 0).mean() >= 0.5]
+    if not thick:
+        return np.zeros((h, w), np.uint8)
+    thick.sort()
+    weights = np.cumsum([a for _, a in thick])
+    char = float(thick[int(np.searchsorted(weights, weights[-1] / 2))][0])
+    add = np.zeros((h, w), np.uint8)
+    for i in range(1, n):
+        x, y, bw, bh, area = (int(v) for v in stats[i])
+        if area < 12 or x == 0 or y == 0 or x + bw >= w or y + bh >= h:
+            continue
+        comp = labels == i
+        if (core[comp].sum() < 0.6 * area) or ((kept[comp] > 0).sum() >= 0.5 * area):
+            continue
+        # 글자답지 않은 것은 되살리지 않는다. 실측(작품 8종)에서 되살린 것 대부분이 글자가 아니었다 —
+        # 그림 선·집중선(가늘다), 말풍선 가시 끝 조각(작다), 글자 상자에 걸친 인물 소매(너무 두껍다)
+        if not (0.5 * char <= min(bw, bh) <= 1.8 * char and area >= 0.5 * char * char
+                and area >= 0.25 * bw * bh):
+            continue
+        add[comp] = 255
+    if not add.any():
+        return add
+    grown = cv2.dilate(add, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    return cv2.bitwise_and(cv2.bitwise_and(glyph, grown), cv2.bitwise_not(kept))
+
+
+def _see_through(crop: np.ndarray, glyph: np.ndarray, bg: np.ndarray, limit: float = 0.08) -> bool:
+    """그림이 비치는 반투명 말풍선인가. 그렇다면 글자 자리를 흐린 바탕색으로 평평하게 메우면 안쪽 그림 선이
+    끊기고 글자 덩어리 모양의 흰 조각이 남는다(test04 23쪽 '何これ' '妾の視界'). LaMa 로 메워야 한다.
+
+    말풍선 안쪽을 테두리에서 6px 떨어뜨리고 글자 둘레도 뺀 곳에서, 바탕보다 뚜렷이 어두운(선) 픽셀의
+    비율로 가린다. 실측: 반투명 말풍선 0.125~0.214, 평범한 말풍선 0.021 이하. 다른 작품에서 이 기준에
+    걸리는 말풍선은 1~12%."""
+    inside = (bg > 0) | (glyph > 0)
+    inner = cv2.erode(inside.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=6) > 0
+    zone = inner & ~(cv2.dilate(glyph, np.ones((3, 3), np.uint8), iterations=3) > 0)
+    if zone.sum() < 200:
+        return False
+    v = _lum(crop)[zone]
+    return float((v < np.median(v) - 30).mean()) > limit
+
+
+def _cover_text(body: list[int], text: list[int], bubble: list[int] | None, need: float = 0.8) -> list[int]:
+    """본체가 원문 글자 상자를 need 만큼 덮지 못하면 글자 상자까지 넓힌다(말풍선 상자 밖으로는 안 넓힘).
+
+    원문 글자가 있던 자리는 확실히 말풍선 안이다. 그림 위에 얹힌 반투명 말풍선은 색 채우기가 망점에 막혀
+    본체가 일부만 잡히는데(Kamaboko 異世界 24쪽: 글자는 y 282~498, 본체는 391~499), 겹침 검사(50%)는
+    통과해 번역문이 말풍선 아래쪽에 몰렸다."""
+    ov = max(0, min(body[2], text[2]) - max(body[0], text[0])) * max(0, min(body[3], text[3]) - max(body[1], text[1]))
+    if ov >= need * max(1, (text[2] - text[0]) * (text[3] - text[1])):
+        return body
+    out = [min(body[0], text[0]), min(body[1], text[1]), max(body[2], text[2]), max(body[3], text[3])]
+    if bubble:
+        out = [max(out[0], bubble[0]), max(out[1], bubble[1]), min(out[2], bubble[2]), min(out[3], bubble[3])]
+    return out
+
+
+def _ellipse_floor(body: list[int], bubble: list[int] | None, keep: float = 0.6) -> list[int]:
+    """본체가 말풍선에 내접하는 사각형보다 훨씬 작으면 그 사각형을 쓴다.
+
+    본체는 말풍선 안쪽을 flood fill 해서 재는데, 안쪽에 망점·그림 선이 비치면 채우기가 막혀 본체가 작게
+    잡히고 번역문이 그만큼 작아진다(Kamaboko 異世界 05쪽: 257x348 말풍선의 본체가 157x63 띠로 잡혀 18px).
+    말풍선 상자에 내접하는 타원의 안쪽 사각형(가로·세로 0.72 배)은 둥근 말풍선이면 늘 말풍선 안이다.
+    본체가 그 넓이의 keep 배도 안 되면 믿지 않는다."""
+    if not bubble:
+        return body
+    bw, bh = bubble[2] - bubble[0], bubble[3] - bubble[1]
+    ew, eh = 0.72 * bw, 0.72 * bh
+    if (body[2] - body[0]) * (body[3] - body[1]) >= keep * ew * eh:
+        return body
+    cx, cy = (bubble[0] + bubble[2]) / 2, (bubble[1] + bubble[3]) / 2
+    return [int(cx - ew / 2), int(cy - eh / 2), int(cx + ew / 2), int(cy + eh / 2)]
+
+
+def _center_on_text(body: list[int], text: list[int], bubble: list[int] | None,
+                    tol: float = 0.08) -> list[int]:
+    """본체 상자가 원문 글자 중심에서 크게 어긋나면 원문 중심을 기준으로 대칭이 되게 줄인다.
+
+    본체는 말풍선 안쪽을 flood fill 해서 잰다. 바탕이 가장자리로 옅어져 옆 그림(밝은 피부)과 이어지면
+    채우기가 말풍선 밖으로 새어 본체가 한쪽으로 커지고, 번역문이 그쪽으로 밀려 그려졌다(test05 055쪽:
+    오른쪽·아래로 약 30px). 작가는 글을 말풍선 가운데 두므로 원문 글자 중심이 더 믿을 만하다.
+    탐지기 말풍선 상자 밖으로 나간 부분은 먼저 잘라낸다. 어긋남이 본체 크기의 tol 이하면 그대로 둔다
+    (꼬리 쪽으로 조금 치우친 말풍선까지 줄이면 자리만 좁아진다)."""
+    x1, y1, x2, y2 = body
+    if bubble:
+        x1, y1, x2, y2 = max(x1, bubble[0]), max(y1, bubble[1]), min(x2, bubble[2]), min(y2, bubble[3])
+    if x2 - x1 < 10 or y2 - y1 < 10:
+        return list(body)
+    cx, cy = (text[0] + text[2]) / 2, (text[1] + text[3]) / 2
+    if not (x1 < cx < x2 and y1 < cy < y2):
+        return [x1, y1, x2, y2]
+    # 대칭으로 줄이되 원문 글자 상자보다 작게는 줄이지 않는다. 원문이 있던 자리는 확실히 말풍선 안이다.
+    # 본체가 한쪽만 잡힌 경우(망점에 막혀 아래 절반만)에 짧은 쪽에 맞추면 178px 이 63px 띠가 됐다(05쪽)
+    lo_x, hi_x = (bubble[0], bubble[2]) if bubble else (x1, x2)
+    lo_y, hi_y = (bubble[1], bubble[3]) if bubble else (y1, y2)
+    if abs((x1 + x2) / 2 - cx) > tol * (x2 - x1):
+        half = max(min(cx - x1, x2 - cx), (text[2] - text[0]) / 2)
+        x1, x2 = int(round(max(lo_x, cx - half))), int(round(min(hi_x, cx + half)))
+    if abs((y1 + y2) / 2 - cy) > tol * (y2 - y1):
+        half = max(min(cy - y1, y2 - cy), (text[3] - text[1]) / 2)
+        y1, y2 = int(round(max(lo_y, cy - half))), int(round(min(hi_y, cy + half)))
+    return [x1, y1, x2, y2]
 
 
 def _drop_line_parts(mask: np.ndarray, long_ratio: float = 3.0, fill_max: float = 0.22) -> np.ndarray:
@@ -179,8 +387,16 @@ def _bubble_region(lum: np.ndarray, bg_lum: float, glyph: np.ndarray, diff: int,
     return cv2.erode(region, np.ones((3, 3), np.uint8))   # 테두리 선 자체는 건드리지 않게 1px 안쪽
 
 
+def _halo_px(r: Region) -> int:
+    """흰 외곽선 두께 어림: 원문 글자 크기의 0.2 배(4~16px)."""
+    w, h = r.box[2] - r.box[0], r.box[3] - r.box[1]
+    char = source_font_size(r.text_ja, w, h) or min(w, h)
+    return int(np.clip(0.2 * char, 4, 16))
+
+
 def erase_bubble_text(img: np.ndarray, r: Region, pad: int, mask_out: np.ndarray | None = None,
-                      lama_mask: np.ndarray | None = None) -> None:
+                      lama_mask: np.ndarray | None = None, tmask: np.ndarray | None = None,
+                      bmask: np.ndarray | None = None) -> None:
     """img(RGB, 제자리 수정)에서 r.box 안의 글자만 지운다. r.text_color 를 정한다.
     크롭은 말풍선 박스(bubble_box)와 글자 상자를 합친 영역이다."""
     h, w = img.shape[:2]
@@ -194,7 +410,42 @@ def erase_bubble_text(img: np.ndarray, r: Region, pad: int, mask_out: np.ndarray
     if crop.size == 0:
         return
     tbox = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
-    glyph, bg, _, mixed = glyph_mask(crop, tbox)
+    restored: list = []
+    glyph, bg, bg_lum, mixed = glyph_mask(crop, tbox, restored_out=restored)
+    flat = not mixed                              # 색 판정이 평평한 바탕으로 본 말풍선
+    if not mixed and _see_through(crop, glyph, bg):
+        mixed = True
+    if tmask is not None:
+        halo = _halo_px(r)
+        # 지울 픽셀을 모델 글자 근처로 줄이는 건 색 판정이 평평한 바탕으로 본 말풍선에서만 한다. 거기서는
+        # 비치는 그림 선·그물 무늬를 살린다(test04 23쪽, Toropucchi 42쪽). 빗금·회색 바탕(LaMa 로 메우는 곳)
+        # 에서 줄이면 LaMa 가 남은 빗금 사이를 얼룩으로 메웠다(Toropucchi 04쪽). 모델 글자 근처의 놓친 획을
+        # 보충하는 건 늘 하되, 평평한 말풍선이면 말풍선 안쪽(글자+바탕)에서만 한다
+        # 색 판정이 놓쳐 되살린 조각도 안쪽으로 친다. 안 그러면 바로 그 조각(가시 테두리 가장자리 열)이 보충에서
+        # 빠져 test05 055쪽 'ま、' '気持ちよすぎる！' 가 다시 남았다
+        extra_in = restored[0] if restored and restored[0].any() else np.zeros_like(glyph)
+        base = cv2.bitwise_or(glyph, extra_in)
+        region = (cv2.dilate(cv2.bitwise_or(base, bg), cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * halo + 1, 2 * halo + 1))) if flat else None)
+        # 분할 모델이 이 글의 말풍선을 잡았으면 그 윤곽이 더 믿을 만한 경계다. 검은 말풍선은 색 채우기가
+        # 이어진 어두운 머리카락으로 새어, 보충이 말풍선 밖을 검게 칠했다(Tsusauto 106쪽)
+        if bmask is not None:
+            seg = cv2.dilate(bmask[y1:y2, x1:x2], np.ones((5, 5), np.uint8))
+            region = seg if region is None else cv2.bitwise_and(region, seg)
+        cut = limit_to_text(base, tmask[y1:y2, x1:x2], tbox, halo, _lum(crop), bg_lum,
+                            restrict=flat, region=region)
+        if cut is not None:
+            dropped = cv2.bitwise_and(glyph, cv2.bitwise_not(cut))
+            glyph = cut
+            bg = cv2.bitwise_and(cv2.bitwise_or(bg, dropped), cv2.bitwise_not(glyph))
+            if restored and restored[0].any():
+                restored[0] = cv2.bitwise_and(restored[0], cut)
+    if restored and restored[0].any():
+        glyph = cv2.bitwise_or(glyph, restored[0])
+        # 되살린 조각이 있다 = 바탕이 평평하지 않은 말풍선이다(가시 테두리·그라데이션). 이 글자 전체를
+        # LaMa 로 메운다. 되살린 조각만 LaMa 로, 나머지는 흐린 바탕색으로 메우면 두 방식의 경계가
+        # 세로 띠로 드러났다(test05 055쪽)
+        mixed = True
     bg_px = crop[bg > 0]
     if len(bg_px) == 0:
         return
@@ -508,9 +759,18 @@ class Eraser:
         # 기울기는 지우기 전 원본에서 잰다 (지우는 도중에는 이웃 글자가 이미 사라져 있을 수 있다)
         orig_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         pixel_style_check(orig_gray, page)        # 획이 고른 글자는 모델 판정과 달라도 인쇄체로
+        col_colors: dict[int, tuple] = {}          # id(r) → 열로 잰 (채움 색, 둘레 색)
+        tmask = text_mask(page.layout, (h, w)) if self.cfg.layout.erase else None
+        seg_bubbles = bubble_masks(page.layout, (h, w)) if tmask is not None else []
         for r in page.regions:
             r.angle, r.rot_box = 0.0, None
             r.writing = _label_writing(r, self.cfg)
+            if r.writing == "auto":
+                r.writing, r.glyph_px, colors = _free_vertical(img, r, self.cfg)
+                if colors:
+                    col_colors[id(r)] = colors
+            if r.writing == "vcols":
+                continue                            # 원문 열 자리에 똑바로 세워 쓴다
             # 기울기는 글줄에서 나온다. 기호를 뺀 글자가 3자 미만이면('ん♡') 글줄이라 할 수 없다
             if (r.render and r.erase != "none" and self.cfg.render.follow_angle
                     and len(re.findall(r"\w", r.text_ja)) >= 3):
@@ -529,13 +789,36 @@ class Eraser:
                     measure_text_style(img, r, self.cfg.render.bold_stroke_ratio)
                 except Exception as ex:  # noqa: BLE001
                     page.warnings.append(f"스타일 측정 실패 (id={r.id}): {ex}")
-            if r.erase == "white":
+            if id(r) in col_colors:
+                fill, halo, ncols = col_colors[id(r)]
+                # 여러 열이 일정한 간격으로 늘어선 글, 글자마다 흰 외곽선을 두른 글은 조판한 인쇄체다.
+                # 흰 외곽선을 두른 굵은 인쇄체는 획 측정이 외곽선에 흔들려(test02 320쪽: 굵기 비율 1.51)
+                # 손글씨로 판정되고, 펜 글씨체로 가늘고 작게 그려졌다
+                if r.style == "hand" and (ncols >= 2 or _is_white(halo)):
+                    r.style = "gothic"
+                    r.notes = (r.notes + " 글꼴:조판 글씨→인쇄체").strip()
+            if id(r) in col_colors and self.cfg.render.match_color:
+                r.text_rgb = fill
+                # 둘레가 글자와 밝기가 크게 다를 때만 외곽선으로 본다(같으면 그냥 배경)
+                lum = lambda c: 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]  # noqa: E731
+                r.outline_rgb = halo if halo and abs(lum(halo) - lum(fill)) > 80 else None
+            if id(r) in col_colors and _fill_in_halo(img, r, col_colors[id(r)][1]):
+                pass                                # 흰 외곽선은 두고 글자만 지웠다
+            elif r.erase == "white":
                 erase_bubble_text(img, r, e.bubble_padding,
-                                  lama_mask=lama_mask if e.lama else None)
+                                  lama_mask=lama_mask if e.lama else None, tmask=tmask,
+                                  bmask=bubble_for(r.box, seg_bubbles) if tmask is not None else None)
             elif r.erase == "lama":
                 x1, y1, x2, y2 = _clip(r.box, w, h, e.lama_dilate)
-                lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2],
-                                                     _art_text_mask(orig_gray, r.box, e.lama_dilate, (x1, y1, x2, y2)))
+                art = _art_text_mask(orig_gray, r.box, e.lama_dilate, (x1, y1, x2, y2))
+                if tmask is not None:
+                    tb = (r.box[0] - x1, r.box[1] - y1, r.box[2] - x1, r.box[3] - y1)
+                    g = orig_gray[y1:y2, x1:x2].astype(np.float32)
+                    ring = np.ones(g.shape, bool); ring[3:-3, 3:-3] = False
+                    cut = limit_to_text(art, tmask[y1:y2, x1:x2], tb, _halo_px(r) + e.lama_dilate,
+                                        g, float(np.median(g[ring])) if ring.any() else None)
+                    art = cut if cut is not None else art
+                lama_mask[y1:y2, x1:x2] = np.maximum(lama_mask[y1:y2, x1:x2], art)
 
         page_weight_check(page, self.cfg.render.bold_stroke_ratio)
 
@@ -556,12 +839,18 @@ class Eraser:
         # (탐지기가 준 bubble_box 는 꼬리·뿔까지 감싸서 중심이 본체와 어긋난다).
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         tilted: dict[int, tuple[float, float, float, float]] = {}     # id(r) → 세운 말풍선 상자
+        bubbles = bubble_masks(page.layout, (h, w)) if self.cfg.layout.body else []
         for r in page.regions:
             if not (r.render and r.erase == "white" and r.kind == "bubble_text"):
                 continue
             try:
+                # 분할 모델이 잡은 말풍선이 있으면 그 윤곽을 쓴다. 색으로 채워 나가면 망점·반투명·빗금에서
+                # 막히거나 샌다. 모델 마스크는 테두리 선까지 덮으므로 조금 깎아 안쪽만 남긴다
                 interior = bubble_interior(gray, r, e.flood_tolerance)
                 body = self._measure_body(r, interior)
+                seg = bubble_for(r.box, bubbles)
+                if seg is not None:
+                    interior, body = self._pick_body(r, interior, body, seg)
                 if body and e.widen_bubbles and r.text_ko.strip():
                     self._widen(img, gray, r, page, interior, body)
                 if r.angle and interior is not None and r.body_box and not r.widened:
@@ -618,7 +907,39 @@ class Eraser:
                 continue
             r.rot_box = [round(v, 1) for v in fit]
 
-    def _measure_body(self, r: Region, interior: np.ndarray | None) -> tuple[int, int, int, int] | None:
+    def _pick_body(self, r: Region, flood: np.ndarray | None, flood_body, seg: np.ndarray):
+        """색 채우기로 잰 본체와 분할 모델 윤곽으로 잰 본체 중 넓은 쪽을 쓴다. (고른 안쪽 마스크, 본체)
+
+        모델은 망점·반투명·빗금에 막히지 않아, 색 채우기가 막혀 작게 잡힌 말풍선에서 넓은 자리를 준다
+        (작품 6종 표본 283개 중 10개가 15% 넘게 커졌고 대부분 나아짐: Kamaboko 09쪽 'イク…ッ' 22 → 32px).
+        반대로 모델 마스크는 말풍선 안쪽에 딱 붙어, 모델 쪽이 더 좁을 때 그것을 쓰면 글자만 작아졌다
+        (12개가 13% 넘게 작아졌고 대부분 나빠짐: 33쪽 'さて…' 32 → 21px). 그래서 모델은 넓힐 때만 쓴다.
+        색 채우기가 새서 커지는 경우는 _center_on_text 가 말풍선 상자 안으로 자른다."""
+        flood_box = r.body_box
+        k = max(2, int(min(r.box[2] - r.box[0], r.box[3] - r.box[1]) * 0.03))
+        seg_in = cv2.erode(seg, np.ones((2 * k + 1, 2 * k + 1), np.uint8))
+        seg_body = self._measure_body(r, seg_in, trusted=True)
+        seg_box = r.body_box
+        # 붙은 말풍선을 한 마스크로 잡으면 본체가 옆 말풍선까지 뻗는다(Sevengar 139쪽: 글이 왼쪽 말풍선으로
+        # 넘어가 앞부분이 잘림). 탐지기가 이 글에 붙여 준 말풍선 상자 안으로 자른다
+        if seg_box is not None and r.bubble_box:
+            bb = r.bubble_box
+            seg_box = [max(seg_box[0], bb[0]), max(seg_box[1], bb[1]), min(seg_box[2], bb[2]), min(seg_box[3], bb[3])]
+            if seg_box[2] - seg_box[0] < 10 or seg_box[3] - seg_box[1] < 10:
+                seg_box = None
+            r.body_box = seg_box
+        area = lambda b: (b[2] - b[0]) * (b[3] - b[1]) if b else 0  # noqa: E731
+        # 붙어 있는 두 말풍선을 모델이 한 마스크로 잡으면 안쪽 사각형이 옆 말풍선에 잡힌다(Toropucchi 28쪽:
+        # 'よぉ〜っし' 가 옆 말풍선으로 넘어가 그려짐). 원문 글자 상자 중심을 품지 않으면 쓰지 않는다
+        cx, cy = (r.box[0] + r.box[2]) / 2, (r.box[1] + r.box[3]) / 2
+        holds = seg_box is not None and seg_box[0] <= cx <= seg_box[2] and seg_box[1] <= cy <= seg_box[3]
+        if holds and area(seg_box) > area(flood_box):
+            return seg_in, seg_body
+        r.body_box = flood_box
+        return flood, flood_body
+
+    def _measure_body(self, r: Region, interior: np.ndarray | None, trusted: bool = False
+                      ) -> tuple[int, int, int, int] | None:
         """말풍선 내부 마스크에서 본체 사각형을 재어 r.body_box 에 넣는다.
 
         flood fill 이 글자 획 안에 갇히거나(아주 작은 마스크) 말풍선 밖으로 크게 새면 믿을 수 없으므로
@@ -639,7 +960,15 @@ class Eraser:
         ov = max(0, min(bx2, body[2]) - max(bx1, body[0])) * max(0, min(by2, body[3]) - max(by1, body[1]))
         if ov < 0.5 * box_area:
             return None
-        r.body_box = _blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit)
+        inner = _blend(inner_rect(interior, body), body, self.cfg.render.bubble_fit)
+        if trusted:
+            # 분할 모델 윤곽은 믿는다. 작게 잡혔을 때의 보정(_ellipse_floor)도, 새어 커졌을 때의 가운데
+            # 맞춤(_center_on_text)도 하지 않는다 — 가운데 맞춤은 본체가 원문 중심에서 조금만 어긋나도
+            # 원문 글자 상자 크기로 좁혀, 글이 말풍선 한쪽에 치우친 세로쓰기 말풍선에서 글자가 작아졌다
+            r.body_box = inner
+        else:
+            r.body_box = _center_on_text(_ellipse_floor(inner, r.bubble_box), r.box, r.bubble_box)
+        r.body_box = _cover_text(r.body_box, r.box, r.bubble_box)
         return body
 
     def _widen(self, img: np.ndarray, gray: np.ndarray, r: Region, page: Page,
@@ -965,10 +1294,17 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min
                     continue
                 small = min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))
                 if ow * oh < min_ratio * max(1, small):
-                    # 살짝 스치는 정도는 글자까지 겹치지 않아 나누지 않는다. 다만 맞붙은 말풍선이라
-                    # 글자 크기는 맞춘다(07_05_1 구름: '흥♥흥♥' 56px 옆에 40px 대사)
+                    # 살짝 스치는 정도는 나누지 않는다. 다만 맞붙은 말풍선이라 글자 크기는 맞춘다
+                    # (07_05_1 구름: '흥♥흥♥' 56px 옆에 40px 대사)
                     if all(not (a is x and b is y) for x, y in links):
                         links.append((a, b))
+                    # 좌우로 나란한 갈래는 스치기만 해도 번역문이 자리 폭을 꽉 채우면 글자가 겹친다
+                    # (Kamaboko 異世界 57쪽: 26px 겹친 두 갈래의 글이 서로 덮음). 두 원문 사이에서 자른다
+                    side = _side_cut(a, b, gap, min_w) if _side_by_side(a, b) else None
+                    if side:
+                        a.target_box, b.target_box = side[id(a)], side[id(b)]
+                        split_x.update((id(a), id(b)))
+                        moved = True
                     continue
                 acy, bcy = (ay1 + ay2) / 2, (by1 + by2) / 2
                 if abs(acy - bcy) >= 20:
@@ -1233,13 +1569,14 @@ def assign_polygons(page: Page, cfg: Config, gray: np.ndarray) -> None:
                     r.poly = _mask_to_poly(masks[id(r)])
 
 
-def page_weight_check(page: Page, threshold: float, keep_high: float = 1.5, keep_low: float = 0.6) -> None:
+def page_weight_check(page: Page, threshold: float, keep_high: float = 1.5, keep_low: float = 0.5) -> None:
     """한 페이지 말풍선 대사의 굵기를 페이지 중앙값으로 통일한다.
 
     한 페이지의 조판 대사는 대개 같은 글꼴·굵기인데, 측정값이 기준선 근처면 영역마다 0.14 / 0.16 처럼
     갈려 가는 글꼴과 굵은 글꼴이 한 페이지에 섞인다(09_07, 06_04_1). 페이지 중앙값으로 한쪽을 정하고,
     중앙값에서 크게 벗어난 영역(keep_high 배 이상 굵거나 keep_low 배 이하로 가는 것)만 자기 측정값을
-    따른다 — 정말로 굵게 외치는 말풍선은 그대로 남는다."""
+    따른다 — 정말로 굵게 외치는 말풍선은 그대로 남는다. keep_low 는 0.6 이던 것을 0.5 로 낮췄다: 여러 열의
+    작은 글은 획이 가늘게 재져 같은 글꼴인데도 0.59 배가 나와 가는 글꼴로 갈렸다(Kamaboko 異世界 46쪽)."""
     rs = [r for r in page.regions
           if r.kind == "bubble_text" and r.render and r.category == "dialogue" and r.weight_ratio is not None]
     if len(rs) < 3:

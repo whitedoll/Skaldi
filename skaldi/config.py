@@ -31,6 +31,11 @@ class OcrCfg(BaseModel):
     crop_padding: int = 4
     cross_check: bool = True            # 말풍선 밖 글자를 비전 모델로 한 번 더 읽어 OCR 환각을 거른다
     cross_check_min: float = 0.2        # 두 읽기의 일치도가 이 값 미만이면 원본 유지(needs_review)
+    min_confidence: float = 0.8         # Baberu 확신도가 이보다 낮으면 말풍선 안 글자도 비전 모델로 다시 읽는다
+    vision_adopt: bool = True           # Baberu 가 헛읽었다고 보이면 비전 모델 판독으로 바꿔 번역한다
+    vision_adopt_min_chars: int = 3     # 비전 판독이 이보다 짧으면('嫌' 'ッ' 빈칸) 채택하지 않고 원본 유지
+    vision_consistency: float = 0.8     # 비전 판독을 두 번 해 이만큼 맞아야 채택(지어낸 판독은 매번 다르다)
+    oversized_ratio: float = 1.4        # 말풍선 글자가 페이지 중앙값의 이 배 이상 크면 확신도와 상관없이 비전 모델로 다시 읽는다
 
 
 class LlmCfg(BaseModel):
@@ -79,8 +84,14 @@ class RenderCfg(BaseModel):
     overlap_layout: str = "auto"        # 겹친 말풍선 글자 자리: auto(네모·폴리곤 중 작은 글자가 더 큰 쪽, 같으면 네모) | rect | poly
     vertical_short_len: int = 8         # short 모드에서 세로 한 열로 쓸 수 있는 글자 수 (한글·영숫자만 셈)
     group_floor: float = 0.85           # 한 구름 묶음의 글자 크기를 맞출 때 기준 크기의 이 배 밑으로는 내리지 않음
+    free_vertical: bool = True          # 말풍선 밖 세로 글(나레이션·대사)은 원문 열 자리에 세로로 쓴다
+    free_vertical_min_len: float = 16   # 가장 긴 열이 이 글자 수 이상일 때만 세로로 쓴다(짧으면 가로쓰기가 낫다)
+    free_group_floor: float = 0.7       # 원문 크기가 같은 세로 글끼리 크기를 맞출 때, 원문 크기의 이 배 밑으로는 안 내림
+    bubble_group_floor: float = 0.8     # 원문 크기가 같은 말풍선 대사끼리 크기를 맞출 때, 기준 크기의 이 배 밑으로는 안 내림 (0이면 끔)
     overlap_vertical: str = "short"     # 좌우로 붙은 말풍선을 나눠 좁고 길어진 자리: short(한 열에 드는 짧은 웃음·외침만 세로)
                                         # | all(여러 열 세로쓰기도 더 크게 들어가면) | off(항상 가로)
+    match_size: bool = True             # 원문 글자 크기를 재서 기준 크기로 쓴다. 끄면 페이지 높이 비례
+    src_font_scale: float = 0.79        # 원문 글자 크기 추정 계수. 올리면 전체적으로 크게 그린다
     match_style: bool = True            # 글꼴 계열 판정 (굵기는 이 값과 무관하게 항상 적용)
     match_color: bool = True            # 원문 획·외곽선 색을 따라감
     fonts: dict[str, str] = Field(default_factory=dict)        # {gothic, gothic_bold, mincho, mincho_bold, hand, hand_bold}
@@ -94,6 +105,30 @@ class RenderCfg(BaseModel):
     label_vertical: str = "stack"       # 원문이 세로 한 열인 라벨: stack(세로쓰기) | sideways(가로 한 줄을 90° 돌림)
                                         # | off(다른 글자처럼 가로쓰기)
     supersample_below: int = 35         # 이 크기(px) 미만 글자는 크게 그려 줄여서 계단 현상을 줄임
+
+
+class LayoutCfg(BaseModel):
+    """말풍선·글자·효과음 분할 모델(koharu-layout-rfdetr-seg). 판정 근거는 layout.py 참고."""
+    enabled: bool = True                # 장당 약 2.4초(번역 모델과 같은 GPU 에서)
+    sfx: bool = True                    # 효과음으로 분할된 글자는 번역해 그리지 않고 원본을 둔다
+    body: bool = False                  # 말풍선 본체를 모델 윤곽으로도 재어 넓은 쪽을 쓴다(효과는 거의 중립)
+    erase: bool = True                  # 지울 픽셀을 모델 글자 근처로 줄인다(비치는 그림 선·손을 안 지운다)
+    repo: str = "mayocream/koharu-layout-rfdetr-seg-2xl-1152"
+    bubble_threshold: float = 0.5       # 모델 카드 권장값
+    text_threshold: float = 0.25
+    sfx_threshold: float = 0.2
+
+
+class FrontMatterCfg(BaseModel):
+    """표지·속표지 같은 앞장을 번역에서 뺀다. 판정 근거는 frontmatter.py 참고."""
+    skip: bool = True
+    analyze: bool = True            # 앞장도 OCR·번역해서 JSON 에는 남긴다 (그리지는 않는다).
+                                    # 표지 제목을 사람이 직접 식자할 때 쓴다. false 면 장당 약 40초 절약
+    max_pages: int = 4              # 앞에서 이만큼까지만 검사한다 (그 뒤는 무조건 본문)
+    max_bubble_text: int = 1        # 말풍선 안 글자가 이 개수 이하일 때만 앞장 후보
+    logo_area: float = 0.05         # 페이지 면적 대비 이 이상인 '말풍선 밖 글자' = 제목 로고
+    sat_margin: float = 0.05        # 본문 채도 중앙값보다 이만큼 높으면 컬러 페이지
+    ratio_margin: float = 0.08      # 종횡비가 본문과 이만큼 다르면 판형이 다른 장
 
 
 class AnyTextCfg(BaseModel):
@@ -127,6 +162,8 @@ class Config(BaseModel):
     translate: TranslateCfg = TranslateCfg()
     erase: EraseCfg = EraseCfg()
     render: RenderCfg = RenderCfg()
+    frontmatter: FrontMatterCfg = FrontMatterCfg()
+    layout: LayoutCfg = LayoutCfg()
     anytext: AnyTextCfg = AnyTextCfg()
     qwen: QwenCfg = QwenCfg()
 

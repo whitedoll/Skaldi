@@ -165,6 +165,31 @@ def is_vocal(text: str) -> bool:
     return any(core.startswith(l) for l in _LAUGH)
 
 
+# 뜻 없는 발성(신음·모음 늘이기·숨소리)에 쓰이는 글자. 작은 글자·っ·ー 는 길이 비교 전에 뺀다.
+# 탁점 붙인 모음(お゛)은 인식 모델이 ボ·ポ·ご 로 읽으므로 그것도 발성 글자로 본다
+# (Kamaboko 異世界 12쪽 'お゛お゛っ' → 비전 'ポボボボ' → '포보보보' 로 번역됐다)
+_FILLER_BASE = set("あいうえおんはひふへほぼぽごアイウエオンハヒフヘホボポゴ")
+_FILLER_MINOR = re.compile(r"[ぁぃぅぇぉゃゅょっァィゥェォャュョッヮゎー〜～゛゜]+")
+# 발성 글자로만 되어 있어도 뜻이 있는 짧은 대답·부름은 제외하지 않는다 (はい, うん, いい …)
+# (가타카나는 히라가나로 바꿔 비교. え・へ 한 글자는 놀람·관심 반응 え！, へぇ〜 이다)
+_FILLER_KEEP = {"はい", "うん", "ううん", "ええ", "いい", "おい", "いえ", "あい", "ほい", "へい", "ふん", "へえ", "ほう",
+                "はあ", "ひい", "ふう", "え", "へ"}
+
+
+def filler_allowed(text: str) -> bool:
+    """번역 모델이 '뜻 없는 발성'(filler)이라고 답한 글자를 받아들이는 조건.
+    원문이 모음·ん·は행 발성 글자로만 되어 있어야 한다 (おおお, んほぉぉっ, あっあっ, はぁはぁ).
+    웃음(ふふ, へへ)과 짧은 대답(はい, うん)은 문맥과 상관없이 대사로 남긴다."""
+    core = _SFX_STRIP.sub("", text)
+    if not core or is_vocal(text) or any(q in text for q in "？?"):
+        return False                              # ん？ え！？ 처럼 묻는 반응은 뜻이 있다
+    base = _FILLER_MINOR.sub("", core)
+    if not base or any(c not in _FILLER_BASE for c in base):
+        return False
+    hira = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in base)
+    return hira not in _FILLER_KEEP
+
+
 def too_long_for_sfx(text: str, limit: int = 8) -> bool:
     """효과음이라기엔 너무 긴 글자. 이 길이를 넘으면 문장으로 본다.
     (실측: 두 작품의 진짜 손글씨 효과음은 전부 7자 이하, 버려진 대사는 전부 9자 이상)"""

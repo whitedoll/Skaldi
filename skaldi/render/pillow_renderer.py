@@ -7,12 +7,13 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from ..columns import glyph_size, measure
 from ..config import Config
 from ..erase import poly_mask, region_target_box
 from ..normalize import normalize_ko
 from ..page import Page, Region
 from ..textfit import (HALF_CELL_PUNCT, column_steps, fit_polygon, fit_text, fit_vertical, font, has_glyph,
-                       split_runs, split_variation, text_width, unsupported)
+                       source_font_size, split_runs, split_variation, text_width, unsupported)
 
 # 세로쓰기에서 가로 모양 그대로 쓰면 어색한 문장부호: 세로 전용 자형(CJK 호환 형태)으로 바꾼다
 VERTICAL_FORMS = {
@@ -99,10 +100,123 @@ class PillowRenderer:
                 cleaned = "".join(ch for ch in r.text_ko if ch not in bad)
                 page.warnings.append(f"글꼴에 없는 글자를 빼고 그림 (id={r.id}): {bad}")
                 r.text_ko = re.sub(r"\s{2,}", " ", cleaned).strip() or r.text_ko
+        self._measure_source(todo, base)
         caps = self._group_caps(page, base, minimum)
+        free = self._free_caps(page, todo, base, minimum)
+        bubble = self._bubble_caps(page, todo, original, base, minimum, caps)
         for r in todo:
-            self._draw_region(img, r, page, base, minimum, cap=caps.get(r.group))
+            cap = caps.get(r.group) if r.group is not None else free.get(id(r))
+            if id(r) in bubble:
+                cap = bubble[id(r)] if cap is None else min(cap, bubble[id(r)])
+            self._draw_region(img, r, page, base, minimum, cap=cap)
         return img
+
+    def _free_caps(self, page: Page, todo: list[Region], base: int, minimum: int) -> dict[int, int]:
+        """원문 글자 크기가 비슷한 말풍선 밖 세로 글은 번역문도 같은 크기로 맞춘다. {id(r): 상한}
+
+        '비슷하다'는 크기순으로 늘어놓아 이웃끼리 20% 안이고 묶음 전체가 35% 안인 것. 열 폭으로 잰 글자 크기는
+        ±10% 쯤 흔들린다(319쪽: 같은 크기의 두 글이 42·36 으로 측정됐다).
+
+        원문은 같은 크기인데 번역문은 글 양에 따라 제각각이 된다(test02 319쪽: 긴 나레이션은 작게, 짧은
+        대사는 크게). 묶음 안에서 가장 작게 들어가는 크기를 모두의 상한으로 한다. 다만 원문 크기의
+        free_group_floor 배 밑으로는 끌어내리지 않는다 — 한 곳이 유난히 좁다고 전부 작아지면 안 된다."""
+        items = sorted((r for r in todo if r.writing == "vcols" and r.glyph_px and r.group is None),
+                       key=lambda r: r.glyph_px)
+        clusters: list[list[Region]] = []
+        for r in items:
+            if (clusters and r.glyph_px <= clusters[-1][-1].glyph_px * 1.2
+                    and r.glyph_px <= clusters[-1][0].glyph_px * 1.35):
+                clusters[-1].append(r)
+            else:
+                clusters.append([r])
+        caps: dict[int, int] = {}
+        scratch = Image.new("RGB", (page.width, page.height))
+        for cl in clusters:
+            if len(cl) < 2:
+                continue
+            # 크기는 글꼴 보정(font_scale) 전 값으로 견준다. 손글씨체는 같은 크기에서 작아 보여 1.42 배로
+            # 키우는데, 보정 뒤 크기로 상한을 걸면 그 보정이 지워진다
+            nominal = []
+            for r in cl:
+                self._draw_region(scratch, r, page, base, minimum)
+                if r.font_size:
+                    nominal.append(r.font_size / self.pick_font(r)[1])
+            if not nominal:
+                continue
+            cap = max(min(nominal), max(r.glyph_px for r in cl) * self.cfg.render.free_group_floor)
+            for r in cl:
+                caps[id(r)] = int(cap * self.pick_font(r)[1])
+        return caps
+
+    def _bubble_caps(self, page: Page, todo: list[Region], original: Image.Image, base: int, minimum: int,
+                     group_caps: dict[int, int]) -> dict[int, int]:
+        """원문 글자 크기가 비슷한 말풍선 대사끼리 번역문 크기를 맞춘다. {id(r): 상한}
+
+        원문은 한 페이지 대사가 거의 같은 크기인데, 번역문은 글 양과 말풍선 모양에 따라 21~34px 로
+        제각각이 됐다(Kamaboko 異世界 46쪽). 원문 크기는 세로 열 폭(픽셀)으로 재서 _free_caps 와 같은 기준으로
+        묶고(이웃 20%·묶음 35% 안), 세 곳 이상인 묶음에서 가장 작게 들어간 크기를 상한으로 한다. 다만 기준
+        크기 중앙값의 bubble_group_floor 배 밑으로는 끌어내리지 않는다 — 한 곳이 유난히 좁다고 전부 작아지면
+        안 된다. 크게 쓴 외침은 원문 크기가 달라 다른 묶음이 되므로 그대로 크게 남는다."""
+        floor = self.cfg.render.bubble_group_floor
+        if floor <= 0:
+            return {}
+        sized = []
+        for r in todo:
+            if r.kind != "bubble_text" or r.category != "dialogue":
+                continue
+            cols, g = measure(original, r.box)
+            if cols:
+                sized.append((glyph_size(cols, g), r))
+        sized.sort(key=lambda t: t[0])
+        clusters: list[list[tuple[int, Region]]] = []
+        for gs, r in sized:
+            if clusters and gs <= clusters[-1][-1][0] * 1.2 and gs <= clusters[-1][0][0] * 1.35:
+                clusters[-1].append((gs, r))
+            else:
+                clusters.append([(gs, r)])
+        caps: dict[int, int] = {}
+        scratch = Image.new("RGB", (page.width, page.height))
+        for cl in clusters:
+            if len(cl) < 3:
+                continue
+            nominal, bases = [], []
+            for _, r in cl:
+                self._draw_region(scratch, r, page, base, minimum,
+                                  cap=group_caps.get(r.group) if r.group is not None else None)
+                if r.font_size:
+                    nominal.append(r.font_size / self.pick_font(r)[1])
+                bases.append(self._base_for(r, base))
+            if not nominal:
+                continue
+            bases.sort()
+            cap = max(min(nominal), bases[len(bases) // 2] * floor)
+            for _, r in cl:
+                caps[id(r)] = int(cap * self.pick_font(r)[1])
+        return caps
+
+    def _measure_source(self, todo: list[Region], page_base: int) -> None:
+        """영역마다 원문 글자 크기를 되짚어 r.src_font_size 에 넣는다.
+
+        글자가 너무 짧아 못 재는 영역('응!')은 같은 페이지의 중앙값을 쓴다. 혼자 페이지 기준값을
+        쓰면 옆 말풍선과 크기가 따로 논다."""
+        if not self.cfg.render.match_size:
+            for r in todo:
+                r.src_font_size = None
+            return
+        for r in todo:
+            # 세로 열 폭으로 잰 값이 있으면 그것이 더 믿을 만하다(글자 수에 기대지 않는다)
+            r.src_font_size = r.glyph_px or source_font_size(r.text_ja, r.w(), r.h(), self.cfg.render.src_font_scale)
+        measured = sorted(r.src_font_size for r in todo if r.src_font_size)
+        if not measured:
+            return
+        fallback = measured[len(measured) // 2]
+        for r in todo:
+            if not r.src_font_size:
+                r.src_font_size = min(fallback, min(max(10, r.w()), max(10, r.h())))
+
+    def _base_for(self, r: Region, page_base: int) -> int:
+        """이 영역의 기준 글자 크기. 원문을 잰 값이 있으면 그것을 쓴다(판형에 휘둘리지 않는다)."""
+        return r.src_font_size if (self.cfg.render.match_size and r.src_font_size) else page_base
 
     def _group_caps(self, page: Page, base: int, minimum: int) -> dict[int, int]:
         """겹친 말풍선 묶음(r.group)마다 글자 크기 상한 = 묶음에서 가장 작게 들어가는 크기.
@@ -110,8 +224,8 @@ class PillowRenderer:
         단 기준 크기의 group_floor 배 밑으로는 끌어내리지 않는다. 한 글이 좁은 자리에서 작아졌다고 넉넉한
         이웃까지 따라 줄면 구름 전체가 작아진다(07_05_1: 39px 이던 글이 31px 로). 그보다 작은 글은
         자기 자리에 맞는 크기로 그대로 그려진다."""
-        floor = int(base * self.cfg.render.group_floor)
         caps: dict[int, int] = {}
+        floors: dict[int, int] = {}
         scratch = Image.new("RGB", (page.width, page.height))
         for r in page.regions:
             if r.group is None or not r.render or not r.text_ko.strip():
@@ -119,7 +233,9 @@ class PillowRenderer:
             self._draw_region(scratch, r, page, base, minimum)
             if r.font_size:
                 caps[r.group] = min(caps.get(r.group, r.font_size), r.font_size)
-        return {g: max(c, floor) for g, c in caps.items()}
+            floors[r.group] = max(floors.get(r.group, 0), self._base_for(r, base))
+        gf = self.cfg.render.group_floor
+        return {g: max(c, int(floors.get(g, base) * gf)) for g, c in caps.items()}
 
     def _glyph_masks(self, stroke_m: Image.Image | None, fill_m: Image.Image, x: float, y: float,
                      text: str, font_path: str, size: int, outline_w: int, bold_w: int) -> float:
@@ -159,6 +275,7 @@ class PillowRenderer:
         ratio = rc.stroke_ratio if on_art else rc.bubble_stroke_ratio
         font_path, fscale = self.pick_font(r)
         fake_bold = r.weight == "bold" and r.style in set(rc.fake_bold_styles)
+        base = self._base_for(r, base)
         base, minimum = max(6, int(base * fscale)), max(6, int(minimum * fscale))
         if cap:                                     # 같은 묶음(겹친 말풍선)의 글자 크기를 맞춘다
             base = max(minimum, min(base, cap))

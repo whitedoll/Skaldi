@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Kind = Literal["bubble_text", "free_text"]
-Category = Literal["dialogue", "narration", "label", "sfx", "unknown"]
+Category = Literal["dialogue", "narration", "label", "sfx", "filler", "unknown"]
 EraseMode = Literal["white", "lama", "none"]
 
 
@@ -20,11 +20,15 @@ class Region(BaseModel):
     score: float = 0.0
     text_ja: str = ""
     text_ko: str = ""
-    category: Category = "unknown"            # dialogue/narration은 그림, label은 JSON만, sfx는 무시
+    category: Category = "unknown"            # dialogue/narration은 그림, label은 JSON만, sfx·filler(뜻 없는 신음)는 무시
     order: int | None = None                  # 읽기 순서 (0부터)
     render: bool = True                       # 이미지에 그릴지
     erase: EraseMode = "white"
     font_size: int | None = None              # 렌더러가 실제 사용한 크기
+    src_font_size: int | None = None          # 원문 글자 크기 추정값 (기준 크기로 쓴다)
+    glyph_px: int | None = None               # 세로 열 폭으로 잰 원문 글자 크기. 있으면 src_font_size 보다 우선
+    cols: list[list[int]] | None = None       # 여러 열을 열마다 읽었을 때의 열 상자(오른쪽 열부터)
+    split_from: int | None = None             # 색으로 나눈 조각이면 원래 탐지 상자 번호 (따옴표 대사가 없으면 다시 합친다)
     text_color: str = "black"                 # 말풍선 배경이 어두우면 white (지우기 단계에서 결정)
     vertical: bool = False                    # 세로쓰기로 그렸는지
     style: str = "gothic"                     # 글꼴 계열: gothic(고딕/인쇄체) | mincho(명조) | hand(손글씨)
@@ -44,6 +48,7 @@ class Region(BaseModel):
     overflow: bool = False                    # 최소 크기에서도 넘침
     refused: bool = False                     # 번역 거부·순화 감지
     ocr_backend: str = ""
+    ocr_conf: float | None = None             # Baberu 토큰 확률 평균. 낮으면 헛읽기일 가능성이 크다
     notes: str = ""
 
     def w(self) -> int:
@@ -61,6 +66,7 @@ class Page(BaseModel):
     regions: list[Region] = Field(default_factory=list)
     models: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    layout: list | None = Field(default=None, exclude=True)   # 분할 모델 결과(layout/<이름>.json 에 따로 둔다)
 
     def ordered(self) -> list[Region]:
         """읽기 순서대로 정렬. 순서가 없으면 id 순."""

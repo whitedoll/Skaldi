@@ -68,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--export", default=None, help="내보낼 렌더러 (기본: 첫 번째 렌더러)")
     ap.add_argument("--zip", action="store_true",
                     help="폴더 입력도 결과를 zip 으로 내보낸다 (zip 입력은 원래부터 zip 으로 나온다)")
+    ap.add_argument("--no-skip-front", action="store_true",
+                    help="표지·속표지 자동 건너뛰기를 끄고 앞장도 번역한다 "
+                         "(기본값은 config 의 frontmatter.skip)")
     ap.add_argument("--debug", action="store_true",
                     help="<작업폴더>/debug/ 에 글자 상자·말풍선 상자·글자 자리를 겹쳐 그린 그림을 남긴다")
     ap.add_argument("--export-only", action="store_true",
@@ -79,6 +82,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg.llm.backend = args.backend
     if args.ocr:
         cfg.ocr.backend = args.ocr
+    # --files 로 장을 직접 고른 사람은 그 장을 처리하려는 것이다. 표지를 골랐는데 말없이
+    # 건너뛰면 당황스러우므로 앞장 판정을 끈다.
+    if args.no_skip_front or args.files:
+        cfg.frontmatter.skip = False
     if args.out and len(args.inputs) > 1:
         print("--out 은 입력이 하나일 때만 쓸 수 있습니다. 여러 개면 --out-root 를 쓰세요.", file=sys.stderr)
         return 2
