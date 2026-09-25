@@ -35,6 +35,7 @@ class OcrCfg(BaseModel):
     vision_adopt: bool = True           # Baberu 가 헛읽었다고 보이면 비전 모델 판독으로 바꿔 번역한다
     vision_adopt_min_chars: int = 3     # 비전 판독이 이보다 짧으면('嫌' 'ッ' 빈칸) 채택하지 않고 원본 유지
     vision_consistency: float = 0.8     # 비전 판독을 두 번 해 이만큼 맞아야 채택(지어낸 판독은 매번 다르다)
+    oversized_ratio: float = 1.4        # 말풍선 글자가 페이지 중앙값의 이 배 이상 크면 확신도와 상관없이 비전 모델로 다시 읽는다
 
 
 class LlmCfg(BaseModel):
@@ -86,6 +87,7 @@ class RenderCfg(BaseModel):
     free_vertical: bool = True          # 말풍선 밖 세로 글(나레이션·대사)은 원문 열 자리에 세로로 쓴다
     free_vertical_min_len: float = 16   # 가장 긴 열이 이 글자 수 이상일 때만 세로로 쓴다(짧으면 가로쓰기가 낫다)
     free_group_floor: float = 0.7       # 원문 크기가 같은 세로 글끼리 크기를 맞출 때, 원문 크기의 이 배 밑으로는 안 내림
+    bubble_group_floor: float = 0.8     # 원문 크기가 같은 말풍선 대사끼리 크기를 맞출 때, 기준 크기의 이 배 밑으로는 안 내림 (0이면 끔)
     overlap_vertical: str = "short"     # 좌우로 붙은 말풍선을 나눠 좁고 길어진 자리: short(한 열에 드는 짧은 웃음·외침만 세로)
                                         # | all(여러 열 세로쓰기도 더 크게 들어가면) | off(항상 가로)
     match_size: bool = True             # 원문 글자 크기를 재서 기준 크기로 쓴다. 끄면 페이지 높이 비례

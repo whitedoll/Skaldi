@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from ..columns import glyph_size, measure
 from ..config import Config
 from ..erase import poly_mask, region_target_box
 from ..normalize import normalize_ko
@@ -102,8 +103,11 @@ class PillowRenderer:
         self._measure_source(todo, base)
         caps = self._group_caps(page, base, minimum)
         free = self._free_caps(page, todo, base, minimum)
+        bubble = self._bubble_caps(page, todo, original, base, minimum, caps)
         for r in todo:
             cap = caps.get(r.group) if r.group is not None else free.get(id(r))
+            if id(r) in bubble:
+                cap = bubble[id(r)] if cap is None else min(cap, bubble[id(r)])
             self._draw_region(img, r, page, base, minimum, cap=cap)
         return img
 
@@ -141,6 +145,52 @@ class PillowRenderer:
                 continue
             cap = max(min(nominal), max(r.glyph_px for r in cl) * self.cfg.render.free_group_floor)
             for r in cl:
+                caps[id(r)] = int(cap * self.pick_font(r)[1])
+        return caps
+
+    def _bubble_caps(self, page: Page, todo: list[Region], original: Image.Image, base: int, minimum: int,
+                     group_caps: dict[int, int]) -> dict[int, int]:
+        """원문 글자 크기가 비슷한 말풍선 대사끼리 번역문 크기를 맞춘다. {id(r): 상한}
+
+        원문은 한 페이지 대사가 거의 같은 크기인데, 번역문은 글 양과 말풍선 모양에 따라 21~34px 로
+        제각각이 됐다(Kamaboko 異世界 46쪽). 원문 크기는 세로 열 폭(픽셀)으로 재서 _free_caps 와 같은 기준으로
+        묶고(이웃 20%·묶음 35% 안), 세 곳 이상인 묶음에서 가장 작게 들어간 크기를 상한으로 한다. 다만 기준
+        크기 중앙값의 bubble_group_floor 배 밑으로는 끌어내리지 않는다 — 한 곳이 유난히 좁다고 전부 작아지면
+        안 된다. 크게 쓴 외침은 원문 크기가 달라 다른 묶음이 되므로 그대로 크게 남는다."""
+        floor = self.cfg.render.bubble_group_floor
+        if floor <= 0:
+            return {}
+        sized = []
+        for r in todo:
+            if r.kind != "bubble_text" or r.category != "dialogue":
+                continue
+            cols, g = measure(original, r.box)
+            if cols:
+                sized.append((glyph_size(cols, g), r))
+        sized.sort(key=lambda t: t[0])
+        clusters: list[list[tuple[int, Region]]] = []
+        for gs, r in sized:
+            if clusters and gs <= clusters[-1][-1][0] * 1.2 and gs <= clusters[-1][0][0] * 1.35:
+                clusters[-1].append((gs, r))
+            else:
+                clusters.append([(gs, r)])
+        caps: dict[int, int] = {}
+        scratch = Image.new("RGB", (page.width, page.height))
+        for cl in clusters:
+            if len(cl) < 3:
+                continue
+            nominal, bases = [], []
+            for _, r in cl:
+                self._draw_region(scratch, r, page, base, minimum,
+                                  cap=group_caps.get(r.group) if r.group is not None else None)
+                if r.font_size:
+                    nominal.append(r.font_size / self.pick_font(r)[1])
+                bases.append(self._base_for(r, base))
+            if not nominal:
+                continue
+            bases.sort()
+            cap = max(min(nominal), bases[len(bases) // 2] * floor)
+            for _, r in cl:
                 caps[id(r)] = int(cap * self.pick_font(r)[1])
         return caps
 

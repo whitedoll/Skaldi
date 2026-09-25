@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from .config import Config
-from .columns import column_boxes, is_vertical_block, merge_unquoted, split_by_color
+from .columns import column_boxes, dedupe_overlap, is_vertical_block, merge_free_columns, merge_unquoted, split_by_color
 from .columns import measure as measure_columns
 from .debug import debug_image
 from .detect import Detector, attach_bubbles
@@ -21,7 +21,7 @@ from .export import export_result
 from .frontmatter import find as find_frontmatter
 from .glossary import glossary_paths, load_glossary
 from .llm import make_client
-from .ocr import cross_check, crop_region, dots_over_strokes, make_ocr
+from .ocr import cross_check, crop_region, dots_over_strokes, fix_ja, make_ocr
 from .order import classify_styles, order_and_classify, pixel_style_check
 from .page import Page, Region
 from .progress import emit
@@ -206,7 +206,8 @@ class Pipeline:
             for i, (d, bubble) in enumerate(attach_bubbles(dets))
         ]
         # 색이 다른 세로 열 묶음(나레이션 + 분홍 대사)이 한 상자로 잡혔으면 나눈다
-        regions = split_by_color(image, regions)
+        # 열마다 따로 잡힌 말풍선 밖 세로 글은 먼저 한 영역으로 합친다 (색이 다른 열은 바로 다음에 다시 나눈다)
+        regions = split_by_color(image, merge_free_columns(regions))
         for i, r in enumerate(regions):
             r.id = i
         # 번호를 휴리스틱 읽기 순서로 다시 매긴다. 비전 모델이 번호를 그대로 돌려줘도
@@ -241,6 +242,7 @@ class Pipeline:
                     r.ocr_conf = round(conf, 3)
                 else:
                     r.text_ja = ocr.read(crop)
+                r.text_ja = fix_ja(r.text_ja)
             except Exception as e:  # noqa: BLE001
                 page.warnings.append(f"OCR 실패 (id={r.id}): {e}")
             r.ocr_backend = ocr.name
@@ -272,6 +274,7 @@ class Pipeline:
         t3 = time.time()
 
         dots_over_strokes(image, page)       # 점으로 잘못 읽은 손글씨 효과음은 원본을 둔다
+        dedupe_overlap(page)                 # 겹친 두 상자가 같은 열을 나눠 읽은 중복을 뺀다
         merge_unquoted(page)                 # 색으로 나눴지만 한 문장이었던 조각은 다시 합친다
         emit("stage", name="번역")
         translate_page(self.cfg, self.client, page, glossary)

@@ -272,6 +272,21 @@ def _see_through(crop: np.ndarray, glyph: np.ndarray, bg: np.ndarray, limit: flo
     return float((v < np.median(v) - 30).mean()) > limit
 
 
+def _cover_text(body: list[int], text: list[int], bubble: list[int] | None, need: float = 0.8) -> list[int]:
+    """본체가 원문 글자 상자를 need 만큼 덮지 못하면 글자 상자까지 넓힌다(말풍선 상자 밖으로는 안 넓힘).
+
+    원문 글자가 있던 자리는 확실히 말풍선 안이다. 그림 위에 얹힌 반투명 말풍선은 색 채우기가 망점에 막혀
+    본체가 일부만 잡히는데(Kamaboko 異世界 24쪽: 글자는 y 282~498, 본체는 391~499), 겹침 검사(50%)는
+    통과해 번역문이 말풍선 아래쪽에 몰렸다."""
+    ov = max(0, min(body[2], text[2]) - max(body[0], text[0])) * max(0, min(body[3], text[3]) - max(body[1], text[1]))
+    if ov >= need * max(1, (text[2] - text[0]) * (text[3] - text[1])):
+        return body
+    out = [min(body[0], text[0]), min(body[1], text[1]), max(body[2], text[2]), max(body[3], text[3])]
+    if bubble:
+        out = [max(out[0], bubble[0]), max(out[1], bubble[1]), min(out[2], bubble[2]), min(out[3], bubble[3])]
+    return out
+
+
 def _ellipse_floor(body: list[int], bubble: list[int] | None, keep: float = 0.6) -> list[int]:
     """본체가 말풍선에 내접하는 사각형보다 훨씬 작으면 그 사각형을 쓴다.
 
@@ -953,6 +968,7 @@ class Eraser:
             r.body_box = inner
         else:
             r.body_box = _center_on_text(_ellipse_floor(inner, r.bubble_box), r.box, r.bubble_box)
+        r.body_box = _cover_text(r.body_box, r.box, r.bubble_box)
         return body
 
     def _widen(self, img: np.ndarray, gray: np.ndarray, r: Region, page: Page,
@@ -1278,10 +1294,17 @@ def _stack_overlapping(regions: list[Region], gap: int = 6, min_h: int = 28, min
                     continue
                 small = min((ax2 - ax1) * (ay2 - ay1), (bx2 - bx1) * (by2 - by1))
                 if ow * oh < min_ratio * max(1, small):
-                    # 살짝 스치는 정도는 글자까지 겹치지 않아 나누지 않는다. 다만 맞붙은 말풍선이라
-                    # 글자 크기는 맞춘다(07_05_1 구름: '흥♥흥♥' 56px 옆에 40px 대사)
+                    # 살짝 스치는 정도는 나누지 않는다. 다만 맞붙은 말풍선이라 글자 크기는 맞춘다
+                    # (07_05_1 구름: '흥♥흥♥' 56px 옆에 40px 대사)
                     if all(not (a is x and b is y) for x, y in links):
                         links.append((a, b))
+                    # 좌우로 나란한 갈래는 스치기만 해도 번역문이 자리 폭을 꽉 채우면 글자가 겹친다
+                    # (Kamaboko 異世界 57쪽: 26px 겹친 두 갈래의 글이 서로 덮음). 두 원문 사이에서 자른다
+                    side = _side_cut(a, b, gap, min_w) if _side_by_side(a, b) else None
+                    if side:
+                        a.target_box, b.target_box = side[id(a)], side[id(b)]
+                        split_x.update((id(a), id(b)))
+                        moved = True
                     continue
                 acy, bcy = (ay1 + ay2) / 2, (by1 + by2) / 2
                 if abs(acy - bcy) >= 20:
@@ -1546,13 +1569,14 @@ def assign_polygons(page: Page, cfg: Config, gray: np.ndarray) -> None:
                     r.poly = _mask_to_poly(masks[id(r)])
 
 
-def page_weight_check(page: Page, threshold: float, keep_high: float = 1.5, keep_low: float = 0.6) -> None:
+def page_weight_check(page: Page, threshold: float, keep_high: float = 1.5, keep_low: float = 0.5) -> None:
     """한 페이지 말풍선 대사의 굵기를 페이지 중앙값으로 통일한다.
 
     한 페이지의 조판 대사는 대개 같은 글꼴·굵기인데, 측정값이 기준선 근처면 영역마다 0.14 / 0.16 처럼
     갈려 가는 글꼴과 굵은 글꼴이 한 페이지에 섞인다(09_07, 06_04_1). 페이지 중앙값으로 한쪽을 정하고,
     중앙값에서 크게 벗어난 영역(keep_high 배 이상 굵거나 keep_low 배 이하로 가는 것)만 자기 측정값을
-    따른다 — 정말로 굵게 외치는 말풍선은 그대로 남는다."""
+    따른다 — 정말로 굵게 외치는 말풍선은 그대로 남는다. keep_low 는 0.6 이던 것을 0.5 로 낮췄다: 여러 열의
+    작은 글은 획이 가늘게 재져 같은 글꼴인데도 0.59 배가 나와 가는 글꼴로 갈렸다(Kamaboko 異世界 46쪽)."""
     rs = [r for r in page.regions
           if r.kind == "bubble_text" and r.render and r.category == "dialogue" and r.weight_ratio is not None]
     if len(rs) < 3:

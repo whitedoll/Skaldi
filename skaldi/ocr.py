@@ -7,6 +7,7 @@ import sys
 from PIL import Image
 
 from .config import Config
+from .order import filler_allowed
 
 
 class BaberuBackend:
@@ -109,9 +110,24 @@ _VISION_PROMPT = (
 _TEXT_SCHEMA = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
 
 
+# 일치도를 잴 때 빼는 글자. っ·ー·작은 글자는 어느 판독에나 흔해 가짜 판독끼리도 겹친다
+# (52쪽 'はははっっ' ↔ 'ぼっぼっ' 이 っ 하나로 일치 0.5 가 나와 Baberu 헛읽기를 믿었다)
+_WEAK = re.compile(r"[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮーｰ]")
+
+
 def _norm(text: str) -> str:
-    """가나·한자·영숫자만 남기고 세 번 이상 이어진 같은 글자는 둘로 줄인다(ぉぉぉぉ, っっっっ)."""
-    return re.sub(r"(.)\1{2,}", r"\1\1", "".join(_KEEP.findall(text)))
+    """가나·한자·영숫자만 남기고(っ·ー·작은 글자 제외) 세 번 이상 이어진 같은 글자는 둘로 줄인다(ぉぉぉぉ)."""
+    return re.sub(r"(.)\1{2,}", r"\1\1", _WEAK.sub("", "".join(_KEEP.findall(text))))
+
+
+def fix_ja(text: str) -> str:
+    """인식 결과의 버릇을 고친다. Baberu 는 세로쓰기 말줄임표(‥)를 쌍점(：)으로 읽는다.
+    만화 대사에 쌍점은 쓰이지 않으므로 말줄임표로 되돌린다. 그대로 두면 번역문에 ':' 가 남는다
+    (Kamaboko 異世界 '豚のザーメン：' → '돼지 정액:', 'いい桃尻：っ' → '복숭아 엉덩이:').
+    ♀ 기호는 전각 숫자 ９ 로 읽는다('ド淫乱９エルフ' → '음란 9엘프'). 숫자 없이 가나·한자 사이에 홀로 있는
+    ９ 만 ♀ 로 되돌린다."""
+    text = re.sub(r"[：:]+", "…", text)
+    return re.sub(r"(?<=[぀-ヿ一-鿿])９(?=[぀-ヿ一-鿿♥♡])", "♀", text)
 
 
 def squeeze_runs(text: str, keep: int = 4) -> str:
@@ -199,6 +215,27 @@ def dots_over_strokes(image: Image.Image, page, limit: float = 0.22) -> None:
             r.notes = (r.notes + f" 점 판독+큰 획({ratio:.2f})→효과음").strip()
 
 
+def oversized_bubbles(image: Image.Image, page, ratio: float, min_count: int = 3) -> set[int]:
+    """원문 글자가 같은 페이지 말풍선 대사의 중앙값보다 ratio 배 이상 큰 말풍선 글자 id.
+
+    크기는 인식한 글자 수가 아니라 픽셀(세로 열 폭)로 잰다. 헛읽기는 글자 수가 틀려 글자 수로 잰
+    크기도 틀린다. 실측(Kamaboko 異世界): 보통 대사 0.7~1.2, 손글씨 신음 1.5~3.0, 크게 쓴 인쇄체 외침 1.6."""
+    from .columns import glyph_size, measure
+
+    sizes: dict[int, int] = {}
+    for r in page.regions:
+        if r.kind != "bubble_text" or not r.text_ja.strip() or r.category not in ("dialogue", "narration"):
+            continue
+        cols, g = measure(image, r.box)
+        if cols:
+            sizes[r.id] = glyph_size(cols, g)
+    if len(sizes) < min_count:
+        return set()
+    vals = sorted(sizes.values())
+    mid = vals[len(vals) // 2]
+    return {rid for rid, s in sizes.items() if s >= ratio * mid}
+
+
 def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
     """Baberu 판독을 비전 모델로 다시 읽어 헛읽기를 거른다. 대상은 두 가지다.
 
@@ -212,11 +249,14 @@ def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
     긴 나레이션 9개 중 6개는 비전 모델이 끝까지 정확히 읽었는데, 예전에는 그것을 버리고 원본을 뒀다.
     비전 판독도 너무 짧으면('嫌' 'ッ' 빈칸) 원본을 둔다(needs_review)."""
     oc = cfg.ocr
+    big = oversized_bubbles(image, page, oc.oversized_ratio)
     for r in page.regions:
         if r.category not in ("dialogue", "narration", "label") or not r.text_ja.strip():
             continue
         low = r.ocr_conf is not None and r.ocr_conf < oc.min_confidence
-        if r.kind != "free_text" and not low:
+        # 글자가 유난히 큰 말풍선은 확신도가 높아도 다시 읽는다. 탁점 붙은 손글씨 신음('お゛ご゛お゛っ')에서
+        # Baberu 는 'そういうことで' 같은 문장을 확신도 0.81 로 지어낸다(Kamaboko 異世界 36쪽)
+        if r.kind != "free_text" and not low and r.id not in big:
             continue
         crop = crop_region(image, r.box, oc.crop_padding)
         try:
@@ -233,6 +273,12 @@ def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
         if score >= oc.cross_check_min and not low:
             continue                                 # 확신도도 괜찮고 비전과도 맞는다
         conf = f"{r.ocr_conf:.2f}" if r.ocr_conf is not None else "-"
+        if score < oc.cross_check_min and (filler_allowed(seen) or filler_allowed(r.text_ja)):
+            # 두 판독이 어긋나고 한쪽이 신음 글자로만 되어 있으면 손글씨 신음이다. 비전 모델은 탁점 모음
+            # (お゛)을 'ポボボボ' 로 읽어 그대로 번역됐다(12쪽 '포보보보'). 읽은 글자를 믿지 말고 원본을 둔다
+            r.category, r.render, r.erase = "filler", False, "none"
+            r.notes = f"신음 판독(확신도 {conf}, 일치 {score:.2f}) 비전:{seen[:16]}"
+            continue
         if (oc.vision_adopt and len(_norm(seen)) >= oc.vision_adopt_min_chars
                 and _vision_stable(client, cfg, image, r, seen, page)):
             # 'vision:sfx' 는 번역 단계가 효과음 확정 근거로 보는 표시라 덮어쓰지 않는다
@@ -241,9 +287,9 @@ def cross_check(cfg: Config, client, image: Image.Image, page) -> None:
                 r.notes = f"{VISION_ADOPTED}(확신도 {conf}, 일치 {score:.2f}) Baberu:{r.text_ja}"
             page.warnings.append(f"비전 판독으로 바꿈 (id={r.id}, 확신도 {conf}): "
                                  f"{r.text_ja[:16]} → {seen[:24]}")
-            r.text_ja, r.ocr_backend = squeeze_runs(seen), "vision"
+            r.text_ja, r.ocr_backend = fix_ja(squeeze_runs(seen)), "vision"
             continue
-        if score >= oc.cross_check_min:
+        if score >= oc.cross_check_min and r.id not in big:
             continue                                 # 확신도는 낮지만 비전도 못 읽었고 둘이 대체로 맞는다
         r.needs_review, r.render, r.erase = True, False, "none"
         r.notes = f"{OCR_MISMATCH}({score:.2f}) 비전:{seen or '(글자 없음)'}"

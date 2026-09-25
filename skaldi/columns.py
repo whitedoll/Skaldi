@@ -216,6 +216,17 @@ def merge_unquoted(page) -> None:
         if r.split_from is not None:
             groups.setdefault(r.split_from, []).append(r)
     for parts in groups.values():
+        # 멀쩡한 조각들 사이에 끼인 원본 유지 조각은 버린다. 흰 외곽선 글씨에서 열 사이 틈이 딴 색 열로
+        # 잡혀 생긴 가짜 조각이다(Kamaboko 異世界 18쪽 '心までワシの / (가짜) / 言いなり♥' 가 합쳐지지 않아
+        # '마음까지 내' / '말대로♥' 로 따로 번역됨). 합친 상자가 그 자리를 덮으므로 지우기에서도 빠지지 않는다
+        good = [r for r in parts if not r.needs_review]
+        if len(good) >= 2:
+            ux1, ux2 = min(r.box[0] for r in good), max(r.box[2] for r in good)
+            bad = [r for r in parts if r.needs_review]
+            if bad and all(r.box[0] >= ux1 and r.box[2] <= ux2 for r in bad):
+                drop_ids = {id(r) for r in bad}
+                page.regions = [r for r in page.regions if id(r) not in drop_ids]
+                parts = good
         if len(parts) < 2:
             continue
         if any(r.needs_review for r in parts) or any(_QUOTE.match(r.text_ja.strip()) for r in parts):
@@ -235,3 +246,69 @@ def merge_unquoted(page) -> None:
         keep.split_from = None
         drop = {id(r) for r in parts[1:]}
         page.regions = [r for r in page.regions if id(r) not in drop]
+
+
+def merge_free_columns(regions: list) -> list:
+    """말풍선 밖 세로 글자 중 탐지기가 열마다 따로 잡은 것을 한 영역으로 합친다.
+
+    Kamaboko 異世界 18쪽 '心までワシの / 言いなり♥' 는 두 열이 따로 잡혀(가운데에 가짜 상자도 하나) 열마다
+    따로 번역됐고('마음까지 내' / '말대로♥'), 열 폭이 달라 글자 크기(34·24px)와 글꼴 판정도 갈렸다.
+    합치는 조건: 둘 다 한 열 폭의 세로로 긴 상자, 폭이 비슷하고(0.6배 이상), 윗줄이 글자 하나 차이 안에서
+    맞고, 세로로 절반 넘게 겹치며, 좌우 틈이 글자 폭의 0.6배 이하(겹쳐도 됨). 색이 다른 열은 뒤이어
+    split_by_color 가 다시 나눈다."""
+    def column_like(r) -> bool:
+        return r.kind == "free_text" and r.h() >= 2 * r.w()
+
+    def joinable(a, b) -> bool:
+        wa, wb = a.w(), b.w()
+        if min(wa, wb) < 0.6 * max(wa, wb):
+            return False
+        if abs(a.box[1] - b.box[1]) > max(wa, wb):
+            return False
+        if min(a.box[3], b.box[3]) - max(a.box[1], b.box[1]) < 0.5 * min(a.h(), b.h()):
+            return False
+        gap = max(a.box[0], b.box[0]) - min(a.box[2], b.box[2])
+        return gap <= 0.6 * min(wa, wb)
+
+    out = list(regions)
+    merged = True
+    while merged:
+        merged = False
+        for i, a in enumerate(out):
+            if not column_like(a):
+                continue
+            for b in out[i + 1:]:
+                if column_like(b) and joinable(a, b):
+                    keep = a if a.h() >= b.h() else b
+                    keep.box = [min(a.box[0], b.box[0]), min(a.box[1], b.box[1]),
+                                max(a.box[2], b.box[2]), max(a.box[3], b.box[3])]
+                    out.remove(b if keep is a else a)
+                    merged = True
+                    break
+            if merged:
+                break
+    return out
+
+
+_DEDUP_CORE = re.compile(r"[぀-ヿ一-鿿A-Za-z0-9]")
+
+
+def dedupe_overlap(page, min_chars: int = 2) -> None:
+    """상자가 겹친 두 영역이 같은 글자를 나눠 읽었으면 앞 영역에서 뺀다.
+
+    갈래가 둘인 말풍선에서 탐지기가 한 갈래 상자에 옆 갈래의 첫 열까지 담으면, 그 열이 양쪽에 읽힌다
+    (Kamaboko 異世界 28쪽 '催眠で感度上げてるからなド淫乱' + 'ド淫乱♀エルフ♥' → '이 초음란녀' / '초음란 엘프♥').
+    앞 영역 끝과 뒤 영역 첫머리가 같은 글자(min_chars 글자 이상)면 앞 영역에서 지운다. 상자는 줄이지 않는다
+    — 줄이면 그 자리의 다른 열('からな')까지 지우기에서 빠진다."""
+    rs = [r for r in page.regions if r.render and r.text_ja.strip()]
+    for a in rs:
+        for b in rs:
+            if a is b or not (min(a.box[2], b.box[2]) > max(a.box[0], b.box[0])
+                              and min(a.box[3], b.box[3]) > max(a.box[1], b.box[1])):
+                continue
+            ta, tb = a.text_ja, b.text_ja
+            n = next((k for k in range(min(len(ta), len(tb)) - 1, 0, -1) if ta.endswith(tb[:k])), 0)
+            if len(_DEDUP_CORE.findall(tb[:n])) < min_chars or n >= len(ta):
+                continue
+            a.text_ja = ta[:-n].rstrip()
+            a.notes = (a.notes + f" 겹친 글자 중복 제거('{tb[:n]}', id={b.id})").strip()
