@@ -1,6 +1,6 @@
 """로컬 모델·코드·폰트를 미리 내려받는다 (파이프라인은 없으면 자동으로 받지만, 미리 받아 두면 빠르다).
 
-  python scripts/download_models.py            # 탐지기, Baberu OCR, LaMa, 폰트, AnyText 코드
+  python scripts/download_models.py            # 탐지기, Baberu OCR, 분할 모델, LaMa, 폰트, AnyText 코드
   python scripts/download_models.py --anytext  # AnyText 가중치까지 (약 2GB)
 """
 from __future__ import annotations
@@ -48,6 +48,12 @@ def main() -> None:
     print("[Baberu OCR]")
     snapshot_download(cfg.ocr.baberu_repo, local_dir=str(models / "baberu-ocr"),
                       allow_patterns=["*.py", "*.json", "*.txt", "model.safetensors", "tokenizer/*"])
+
+    print("[말풍선·글자 분할(koharu)]")
+    from huggingface_hub import hf_hub_download
+
+    hf_hub_download(cfg.layout.repo, "model.safetensors",
+                    local_dir=str(models / "koharu-layout"))
 
     print("[LaMa]")
     from simple_lama_inpainting import SimpleLama

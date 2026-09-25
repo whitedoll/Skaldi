@@ -1,15 +1,15 @@
 """Skaldi — 만화 번역 CLI.
 
-사용 예)
-  uv run skaldi samples                       # 기본 렌더러(config: render.default)
-  uv run skaldi samples --render both         # pillow + anytext + qwen + 비교 이미지
-  uv run skaldi samples --rerender            # JSON만 읽어 다시 그림
-  uv run skaldi samples --force               # JSON이 있어도 다시 분석
-  uv run skaldi samples --files 08.webp       # 특정 파일만
-  uv run skaldi "samples/book.zip"            # zip/cbz → output/book.zip (같은 항목 이름)
-  uv run skaldi a.zip b.zip samples           # 여러 개를 한 번에 (모델은 한 번만 로드)
-  uv run skaldi samples --out-root D:/결과    # 저장 폴더 지정 → D:/결과/samples_ko/
-  uv run skaldi samples --out D:/결과/여기    # 그 폴더에 바로 (이름 접미사 없음)
+사용 예) 이 프로젝트는 패키지로 설치하지 않으므로 'uv run python -m skaldi' 로 부른다
+  uv run python -m skaldi samples                       # 기본 렌더러(config: render.default)
+  uv run python -m skaldi samples --render both         # pillow + anytext + qwen + 비교 이미지
+  uv run python -m skaldi samples --rerender            # JSON만 읽어 다시 그림
+  uv run python -m skaldi samples --force               # JSON이 있어도 다시 분석
+  uv run python -m skaldi samples --files 08.webp       # 특정 파일만
+  uv run python -m skaldi "samples/book.zip"            # zip/cbz → output/book_ko.zip
+  uv run python -m skaldi a.zip b.zip samples           # 여러 개를 한 번에 (모델은 한 번만 로드)
+  uv run python -m skaldi samples --out-root D:/결과    # 저장 폴더 지정 → D:/결과/samples_ko/
+  uv run python -m skaldi samples --out D:/결과/여기    # 그 폴더에 바로 (이름 접미사 없음)
 """
 from __future__ import annotations
 
@@ -51,6 +51,12 @@ def _export_only(args, cfg, renderers) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 한국어 윈도우 콘솔은 기본 cp949 라, 도움말의 '—' 한 글자에 UnicodeEncodeError 로 죽는다
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001  (파이프·리다이렉트 등 바꿀 수 없는 스트림)
+            pass
     ap = argparse.ArgumentParser(prog="skaldi", description="Skaldi — 일본어 만화 페이지를 한국어로 식자한다.")
     ap.add_argument("inputs", type=Path, nargs="+", help="페이지 이미지 폴더 또는 zip/cbz 파일 (여러 개 가능)")
     ap.add_argument("--out", type=Path, default=None,
