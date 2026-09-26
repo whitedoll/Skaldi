@@ -154,6 +154,13 @@ class QwenCfg(BaseModel):
     clip_device: str = "cpu"       # 텍스트 인코더 위치: cpu 면 VRAM을 확산 모델에 몰아준다
 
 
+class PerfCfg(BaseModel):
+    batch_pages: int = 4                # 이만큼씩 묶어 탐지·OCR → LLM → 그리기 순서로 돈다.
+                                        # 장마다 번갈아 하면 우리 프로세스와 Ollama 가 VRAM 을 주고받느라
+                                        # LLM 호출이 3초에서 20초로 뛴다 (실측 6쪽: 20.9초/장 → 12.4초/장).
+                                        # 1 이면 옛 방식(한 장씩). 크게 잡으면 그만큼 이미지를 메모리에 들고 있는다
+
+
 class Config(BaseModel):
     paths: PathsCfg = PathsCfg()
     detector: DetectorCfg = DetectorCfg()
@@ -164,6 +171,7 @@ class Config(BaseModel):
     render: RenderCfg = RenderCfg()
     frontmatter: FrontMatterCfg = FrontMatterCfg()
     layout: LayoutCfg = LayoutCfg()
+    perf: PerfCfg = PerfCfg()
     anytext: AnyTextCfg = AnyTextCfg()
     qwen: QwenCfg = QwenCfg()
 

@@ -26,6 +26,8 @@ _SCHEMA = {
                 "required": ["id", "category"],
             },
         },
+        # 말풍선 안 글자 중 손글씨 효과음 후보. 전부 분류하게 하면 답변이 길어져 느리다
+        "sfx_ids": {"type": "array", "items": {"type": "integer"}},
     },
     "required": ["order", "categories"],
 }
@@ -80,17 +82,23 @@ def order_and_classify(cfg: Config, client: OllamaClient, image: Image.Image, pa
     if not regions:
         return
     fallback = heuristic_order(regions, page.width)
+    free_regions = [r for r in regions if r.kind == "free_text"]
+    free_ids = [r.id for r in free_regions]
     prompt = (
         "이 이미지는 일본 만화 한 페이지이고, 글자 영역마다 번호 박스가 그려져 있다. "
         "빨간 박스는 말풍선 안 글자, 파란 박스는 말풍선 밖 글자다.\n"
         "1) order: 일본 만화 읽기 순서(오른쪽 위에서 시작해 왼쪽 아래로, 컷 순서를 따름)대로 "
         f"모든 번호를 나열하라. 번호 목록: {[r.id for r in regions]}\n"
-        "2) categories: 모든 번호를 분류하라.\n"
+        # 말풍선 안 글자는 apply_category 가 '대사 아니면 효과음'으로만 정하므로 종류를 묻지 않는다.
+        # 답이 짧아진 만큼 호출이 빨라진다 (실측 8쪽: 4.7~14.9초 → 2.5~3.0초, 읽기 순서는 100% 같음)
+        f"2) categories: 말풍선 밖 글자(파란 박스) {free_ids} 만 분류하라. 말풍선 안 글자는 답하지 말라.\n"
         "  dialogue = 인물이 입으로 하는 말. 말풍선이 없어도 인사·감사·설명·권유하는 말투면 dialogue 다.\n"
         "  narration = 인물의 속마음이나 상황 설명 서술.\n"
         "  label = 누가 말하는 게 아닌 글자만. 인물 이름표, 작품·챕터 제목, 간판·표지판·화면 글자.\n"
-        "  sfx = 효과음·의성어·의태어. 말풍선 안이라도 손글씨 소리 표현이면 sfx 다.\n"
+        "  sfx = 효과음·의성어·의태어.\n"
         "  주의: 문장이 길거나 말끝이 대화체(です/ます/ね/よ/～/♥)면 label 이 아니다. 애매하면 dialogue.\n"
+        "3) sfx_ids: 말풍선 안 글자(빨간 박스) 중 손으로 그린 효과음·의성어로 보이는 번호만 나열하라. "
+        "사람이 하는 말은 넣지 말라 (없으면 빈 배열).\n"
         "JSON으로만 답하라."
     )
     img = annotated_page(image, regions, cfg.llm.page_long_side, cfg.abs(cfg.paths.font))
@@ -98,6 +106,8 @@ def order_and_classify(cfg: Config, client: OllamaClient, image: Image.Image, pa
         data = client.chat_json(cfg.llm.vision_model, prompt, images=[img], schema=_SCHEMA)
         order = [int(i) for i in data.get("order", [])]
         cats = {int(d["id"]): d["category"] for d in data.get("categories", [])}
+        for i in data.get("sfx_ids", []):
+            cats.setdefault(int(i), "sfx")     # 말풍선 안 효과음 후보(규칙·번역 모델이 한 번 더 검증한다)
     except Exception as e:  # noqa: BLE001
         page.warnings.append(f"순서/분류 호출 실패, 휴리스틱 사용: {e}")
         order, cats = [], {}
@@ -114,7 +124,7 @@ def order_and_classify(cfg: Config, client: OllamaClient, image: Image.Image, pa
     pos = {rid: i for i, rid in enumerate(seq)}
     # 분류 결과에 없는 번호를 unknown 으로 두면 말풍선 밖 대사가 통째로 사라진다.
     # (모델이 categories 배열을 끝까지 안 채우는 일이 잦다) 순서 쪽 휴리스틱처럼 안전망을 둔다.
-    missing = [r.id for r in regions if r.id not in cats]
+    missing = [r.id for r in free_regions if r.id not in cats]
     if missing:
         page.warnings.append(f"분류에 없는 번호 {len(missing)}개 {missing[:10]} 는 대사로 둠")
     for r in regions:

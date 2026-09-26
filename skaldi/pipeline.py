@@ -194,6 +194,14 @@ class Pipeline:
     # ---- stages -------------------------------------------------------
     def analyze(self, src: Path, glossary: dict) -> Page:
         """탐지·OCR·순서·번역까지 수행해 Page 를 만든다 (이미지는 만들지 않음)."""
+        image, page, layout_items = self.analyze_vision(src)
+        return self.analyze_llm(image, page, layout_items, glossary)
+
+    def analyze_vision(self, src: Path):
+        """GPU(torch) 로 하는 앞부분: 탐지·분할·OCR. (이미지, Page, 분할 결과)
+
+        LLM 호출과 번갈아 돌리면 두 프로세스가 VRAM 을 주고받느라 호출 하나가 3초에서 20초로 뛴다
+        (실측 6쪽: 번갈아 20.9초/장, 몰아서 12.4초/장). 그래서 여러 장의 torch 작업을 먼저 몰아서 한다."""
         image = Image.open(src).convert("RGB")
         page = Page(source=str(src), width=image.width, height=image.height)
         t0 = time.time()
@@ -247,20 +255,31 @@ class Pipeline:
                 page.warnings.append(f"OCR 실패 (id={r.id}): {e}")
             r.ocr_backend = ocr.name
         page.models["ocr"] = ocr.name
-        t2 = time.time()
+        page.timing = {"탐지": t1 - t0, "OCR": time.time() - t1}
+        return image, page, layout_items
 
+    def analyze_llm(self, image: Image.Image, page: Page, layout_items, glossary: dict) -> Page:
+        """LLM 으로 하는 뒷부분: 읽기 순서·분류·글꼴·교차검증·번역."""
+        t2 = time.time()
         emit("stage", name="순서·분류")
+        sub = {}
         if self.cfg.llm.backend == "ollama":
+            ts = time.time()
             order_and_classify(self.cfg, self.client, image, page)
+            sub["순서"] = time.time() - ts
+            ts = time.time()
             if self.cfg.render.match_style:
                 classify_styles(self.cfg, self.client, image, page)
+            sub["글꼴"] = time.time() - ts
             # 번역 전에 글꼴 판정을 원문 획으로 보정한다 (번역 단계의 손글씨 효과음 판정이 이 값을 쓴다)
             pixel_style_check(np.array(image.convert("L")), page)
             self._mark_layout_sfx(page, layout_items)     # 교차검증 전에: 효과음은 다시 읽을 필요가 없다
             # Baberu 가 못 읽는 손글씨에서 지어낸 문장은 번역 전에 거른다 (LLM OCR 이면 같은 모델이라 의미 없음)
             if self.cfg.ocr.cross_check and self.ocr.name == "baberu":
                 emit("stage", name="OCR 교차검증")
+                ts = time.time()
                 cross_check(self.cfg, self.client, image, page)
+                sub["교차검증"] = time.time() - ts
             page.models["vision"] = self.cfg.llm.vision_model
         else:
             from .order import heuristic_order
@@ -279,8 +298,11 @@ class Pipeline:
         emit("stage", name="번역")
         translate_page(self.cfg, self.client, page, glossary)
         t4 = time.time()
+        pre = getattr(page, "timing", {}) or {}
         console.print(
-            f"  탐지 {len(page.regions)}개 {t1-t0:.1f}s · OCR {t2-t1:.1f}s · 순서 {t3-t2:.1f}s · 번역 {t4-t3:.1f}s"
+            f"  탐지 {len(page.regions)}개 {pre.get('탐지', 0):.1f}s · OCR {pre.get('OCR', 0):.1f}s · 순서 {t3-t2:.1f}s"
+            + ("(" + " ".join(f"{k} {v:.1f}" for k, v in sub.items()) + ")" if sub else "")
+            + f" · 번역 {t4-t3:.1f}s"
         )
         return page
 
@@ -386,45 +408,44 @@ class Pipeline:
         console.print(f"[dim]처리 시간 {time.time() - t0:.1f}s ({len(images)}장, 장당 {(time.time() - t0) / max(1, len(images)):.1f}s)[/dim]")
 
     def _run_pages(self, images, glossary, renderers, rerender, force, front=None) -> None:
+        """batch_pages 장씩 묶어 ① torch(탐지·분할·OCR) ② LLM ③ 지우기·그리기 순서로 돈다.
+
+        장마다 torch 작업과 LLM 호출을 번갈아 하면, 우리 프로세스와 Ollama 가 같은 카드에서 VRAM 을
+        주고받느라 호출 하나가 3초에서 20초로 뛴다 (실측 6쪽: 번갈아 20.9초/장, 몰아서 12.4초/장)."""
         total = len(images)
         front = front or {}
-        for i, src in enumerate(images):
-            emit("page", index=i, total=total, name=src.name)
-            jpath = self.json_path(src)
-            console.print(f"[cyan]{escape(src.name)}[/cyan]")
-            if src in front:
-                console.print(f"  앞장 — 그리지 않고 원본을 둠 ({front[src]})", style="dim")
-                # 그리지는 않아도 제목 원문·번역문은 JSON 에 남긴다. 표지 식자는 사람이 직접
-                # 하게 되는데(글자를 지울 수 없다) 그때 번역문이 있어야 쓸모가 있다.
-                if self.cfg.frontmatter.analyze and not rerender:
+        n = max(1, self.cfg.perf.batch_pages)
+        done = 0
+        for start in range(0, total, n):
+            chunk = images[start:start + n]
+            prepared: dict[Path, tuple] = {}
+            if not rerender:
+                for src in chunk:
+                    if src in front and not self.cfg.frontmatter.analyze:
+                        continue
+                    jpath = self.json_path(src)
                     if jpath.exists() and not force:
-                        console.print("  JSON 있음, 분석 건너뜀", style="dim")
-                    else:
-                        page = self.analyze(src, glossary)
-                        page.save(jpath)
-                        console.print(f"  → json: {jpath}", markup=False)
-                        for w in page.warnings:
-                            console.print(f"  [yellow]! {w}[/yellow]")
-                else:
-                    emit("stage", name="앞장")
-                # 폴더 입력은 내보내기가 렌더 폴더만 훑으므로(export._pairs) 원본을 거기
-                # 복사해 두어야 결과에서 빠지지 않는다.
-                for name in renderers:
-                    dest = self.render_path(src, name)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dest)
+                        continue
+                    emit("page", index=done + chunk.index(src), total=total, name=src.name)
+                    emit("stage", name="탐지")
+                    console.print(f"[cyan]{escape(src.name)}[/cyan] 탐지·OCR", markup=True)
+                    prepared[src] = self.analyze_vision(src)
+            self._run_chunk(chunk, prepared, glossary, renderers, rerender, force, front, done, total)
+            done += len(chunk)
+
+    def _run_chunk(self, images, prepared, glossary, renderers, rerender, force, front, done, total) -> None:
+        """묶음 하나를 ② LLM → ③ 지우기·그리기 순서로 돈다. 두 단계를 장마다 번갈아 하지 않는 것이 핵심이다."""
+        pages: dict[Path, Page] = {}
+        for i, src in enumerate(images):
+            emit("page", index=done + i, total=total, name=src.name)
+            page = self._analyze_one(src, prepared, glossary, renderers, rerender, force, front)
+            if page is not None:
+                pages[src] = page
+        for i, src in enumerate(images):
+            if src not in pages:
                 continue
-            if rerender:
-                if not jpath.exists():
-                    console.print("  [yellow]JSON이 없어 건너뜀[/yellow]")
-                    continue
-                page = Page.load(jpath)
-            elif jpath.exists() and not force:
-                console.print("  JSON 있음, 분석 건너뜀 (--force 로 다시)")
-                page = Page.load(jpath)
-            else:
-                page = self.analyze(src, glossary)
-                page.save(jpath)
+            emit("page", index=done + i, total=total, name=src.name)
+            page, jpath = pages[src], self.json_path(src)
             apply_label_policy(page, self.cfg, is_cover=self._cover is not None and src == self._cover)
             # 지우기·렌더링 단계 경고는 이번 실행에서 다시 만들어지므로 옛것을 지운다
             # (안 지우면 --rerender 할 때마다 이미 고친 문제의 경고가 계속 쌓인다)
@@ -432,7 +453,47 @@ class Pipeline:
                 ("렌더러", "anytext", "qwen", "LaMa", "말풍선 넓히기", "스타일 측정"))]
             outs = self.render(src, page, renderers, force=force or rerender)
             page.save(jpath)  # font_size, overflow 등 렌더 결과 반영
+            console.print(f"[cyan]{escape(src.name)}[/cyan]")
             for w in page.warnings:
                 console.print(f"  [yellow]! {w}[/yellow]")
             for name, p in outs.items():
                 console.print(f"  → {name}: {p}", markup=False)
+
+    def _analyze_one(self, src: Path, prepared, glossary, renderers, rerender, force, front) -> Page | None:
+        """한 장의 Page 를 준비한다(번역까지). 그리지 않는 앞장이거나 건너뛸 장이면 None."""
+        jpath = self.json_path(src)
+        console.print(f"[cyan]{escape(src.name)}[/cyan]")
+        if src in front:
+            console.print(f"  앞장 — 그리지 않고 원본을 둠 ({front[src]})", style="dim")
+            # 그리지는 않아도 제목 원문·번역문은 JSON 에 남긴다. 표지 식자는 사람이 직접
+            # 하게 되는데(글자를 지울 수 없다) 그때 번역문이 있어야 쓸모가 있다.
+            if self.cfg.frontmatter.analyze and not rerender:
+                if jpath.exists() and not force:
+                    console.print("  JSON 있음, 분석 건너뜀", style="dim")
+                else:
+                    page = self.analyze_llm(*prepared[src], glossary) if src in prepared \
+                        else self.analyze(src, glossary)
+                    page.save(jpath)
+                    console.print(f"  → json: {jpath}", markup=False)
+                    for w in page.warnings:
+                        console.print(f"  [yellow]! {w}[/yellow]")
+            else:
+                emit("stage", name="앞장")
+            # 폴더 입력은 내보내기가 렌더 폴더만 훑으므로(export._pairs) 원본을 거기
+            # 복사해 두어야 결과에서 빠지지 않는다.
+            for name in renderers:
+                dest = self.render_path(src, name)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+            return None
+        if rerender:
+            if not jpath.exists():
+                console.print("  [yellow]JSON이 없어 건너뜀[/yellow]")
+                return None
+            return Page.load(jpath)
+        if jpath.exists() and not force:
+            console.print("  JSON 있음, 분석 건너뜀 (--force 로 다시)")
+            return Page.load(jpath)
+        page = self.analyze_llm(*prepared[src], glossary) if src in prepared else self.analyze(src, glossary)
+        page.save(jpath)
+        return page

@@ -85,7 +85,7 @@ uv run python -m skaldi a.zip b.zip      # 여러 개를 한 번에 (모델은 �
 
 > `uv run skaldi` 는 동작하지 않는다. 이 프로젝트는 패키지로 설치하지 않아서 `uv run python -m skaldi` 를 써야 한다.
 
-한 장에 약 40~60초 걸린다(탐지·OCR·순서 판정·번역·지우기·그리기 전부 포함, RTX 3080 Ti 기준).
+한 장에 약 40초 걸린다(탐지·OCR·순서 판정·번역·지우기·그리기 전부 포함, RTX 3080 Ti 기준). 다른 프로그램이 GPU를 쓰고 있으면 크게 느려지므로, 번역 중에는 GPU를 쓰는 다른 작업을 함께 돌리지 않는 편이 좋다.
 
 ### 자주 쓰는 옵션
 
@@ -176,6 +176,7 @@ uv run python -m skaldi "book.zip" --config config_book.yaml
 | `render.bubble_stroke_ratio` | 0.15 | 말풍선 안 글자의 흰 외곽선 두께. 0이면 없음 |
 | `erase.widen_bubbles` | false | 좁은 말풍선을 넓혀 글자를 키운다(원본 말풍선 모양이 바뀐다) |
 | `layout.enabled` | true | 말풍선·글자·효과음 분할 모델 사용(장당 +2.4초) |
+| `perf.batch_pages` | 4 | 이만큼씩 묶어 탐지·OCR → 번역 → 그리기 순서로 돈다. 1이면 한 장씩(느림) |
 | `frontmatter.skip` | true | 표지·속표지는 번역하지 않고 원본을 둔다 |
 
 ## 잘 안 될 때

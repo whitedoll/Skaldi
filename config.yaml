@@ -75,6 +75,10 @@ frontmatter:                    # 표지·속표지 같은 앞장은 번역하�
   sat_margin: 0.05              # 본문 채도 중앙값보다 이만큼 높으면 컬러 페이지
   ratio_margin: 0.08            # 종횡비가 본문과 이만큼 다르면 판형이 다른 장
 
+perf:
+  batch_pages: 4                # 이만큼씩 묶어 탐지·OCR → LLM → 그리기 순서로 돈다 (1이면 한 장씩)
+                                # 장마다 번갈아 하면 Ollama 와 VRAM 을 주고받느라 LLM 호출이 크게 느려진다
+
 erase:
   bubble_padding: 6             # 글자 획 탐색 크롭 여백(px)
   flood_fill: true              # (넓히기에서) 말풍선 내부를 flood fill로 찾음
